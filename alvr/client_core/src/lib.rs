@@ -22,8 +22,8 @@ use alvr_common::{
 use alvr_events::ButtonValue;
 use alvr_session::{AudioDeviceId, Fov};
 use alvr_sockets::{
-    BatteryPacket, ClientStatistics, DeviceMotion, RequestPacket,
-    ResponsePacket, Tracking, ViewsConfig,
+    BatteryPacket, ClientStatistics, DeviceMotion, RequestPacket, ResponsePacket, Tracking,
+    ViewsConfig,
 };
 use jni::objects::{GlobalRef, ReleaseMode};
 use sockets::RequestSocket;
@@ -288,6 +288,7 @@ pub extern "C" fn alvr_initialize(
 
     *CONNECTION_THREAD.lock() = Some(thread::spawn(move || {
         connection::connection_lifecycle_loop(default_view_resolution, supported_refresh_rates)
+            .ok();
     }));
 }
 

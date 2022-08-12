@@ -1,14 +1,20 @@
-//! Stream-aware TCP socket with packet interface. The stream ID is used to select the correct
-//! buffer pool for the receive end, to reduce unnecessarily large allocations.
+//! Stream-aware TCP socket with length-delimited-coded packet interface. The stream ID is used to
+//! select the correct buffer pool for the receive end, to reduce unnecessarily large allocations.
 //! The API is compatible with both blocking and non-blocking TcpStream instances
 
 use alvr_common::{prelude::*, RelaxedAtomic};
 use std::{
     collections::{HashMap, VecDeque},
     io::{ErrorKind, Read, Write},
-    net::TcpStream,
+    net::{Shutdown, TcpStream},
     sync::Arc,
+    thread,
+    time::Duration,
 };
+
+// This value is a compromise. Biggest value that can still be considered irrelevent for most time
+// critical usages. The bigger the less the CPU is used.
+const EPS_INTERVAL: Duration = Duration::from_micros(500);
 
 // Writes all buffer bytes into the socket. In case the socket returns early, retry, in which case
 // the socket could be temporarily locked by the read thread.
@@ -34,8 +40,10 @@ fn interruptible_write_all(
             }
             Err(e) => {
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted {
-                    continue;
+                    thread::sleep(EPS_INTERVAL);
                 } else {
+                    // the shutdown will be propagated to the read side, returning a 0 sized packet
+                    socket.shutdown(Shutdown::Both).ok();
                     return int_fmt_e!("{e}");
                 }
             }
@@ -43,6 +51,8 @@ fn interruptible_write_all(
     }
 }
 
+// Sometimes the socket disconnection cannot be detected. `socket_connected` is then unset for the
+// write half.
 fn interruptible_read_all(
     mut socket: &TcpStream,
     mut buffer: &mut [u8],
@@ -55,7 +65,10 @@ fn interruptible_read_all(
 
         match res {
             Ok(size) => {
-                if size == buffer.len() {
+                if size == 0 {
+                    // this is the connection closed signal
+                    return interrupt();
+                } else if size == buffer.len() {
                     return Ok(());
                 } else {
                     buffer = &mut buffer[..size];
@@ -63,7 +76,7 @@ fn interruptible_read_all(
             }
             Err(e) => {
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted {
-                    continue;
+                    thread::sleep(EPS_INTERVAL);
                 } else {
                     return int_fmt_e!("{e}");
                 }
@@ -94,15 +107,11 @@ impl LdcTcpSender {
 
     // Note: send() takes mut self because it cannot have concurrent send actions
     pub fn send(&mut self, stream_id: u8, buffer: &[u8]) -> IntResult {
-        if !self.valid {
-            return interrupt();
-        }
+        check_interrupt!(self.valid);
 
         let mut prefix = [0; 9];
         prefix[0] = stream_id;
-        prefix.copy_from_slice(&(buffer.len() as u64).to_le_bytes());
-
-        // let res = interruptible_write_all(&self.socket, &prefix, &self.running);
+        prefix[1..9].copy_from_slice(&(buffer.len() as u64).to_le_bytes());
 
         if let Err(e) = interruptible_write_all(&self.socket, &prefix, &self.running)
             .and_then(|()| interruptible_write_all(&self.socket, buffer, &self.running))
@@ -148,9 +157,7 @@ impl LdcTcpReceiver {
     // available buffers are too small, a new buffer is allocated.
     // Note: recv() takes mut self because it cannot have concurrent send actions
     pub fn recv(&mut self) -> IntResult<(u8, Vec<u8>)> {
-        if !self.valid {
-            return interrupt();
-        }
+        check_interrupt!(self.valid);
 
         let mut prefix = [0; 9];
         if let Err(e) = interruptible_read_all(&self.socket, &mut prefix, &self.running) {

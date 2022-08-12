@@ -140,7 +140,7 @@ pub enum RequestPacket {
     ServerOs,
     UpdateServer { download_url: String },
     ClientCapabilities(Option<VideoStreamingCapabilities>),
-    StreamSocketReady,
+    ClientStreamSocketReady,
     PlayspaceSync(Vec2),
     RequestIdr,
     KeepAlive,
@@ -170,7 +170,8 @@ pub enum SsePacket {
     StartStreaming(StreamConfigPacket),
     StopStreaming,
     Event(Event),
-    ServerRestarting, // legacy
+    ServerRestarting,
+    ServerDisconnecting,
     KeepAlive,
     Custom(String), // use json
 }

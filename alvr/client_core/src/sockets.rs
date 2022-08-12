@@ -1,7 +1,8 @@
-use alvr_common::{prelude::*, RelaxedAtomic, ALVR_NAME};
+use alvr_common::{parking_lot::Mutex, prelude::*, RelaxedAtomic, ALVR_NAME};
 use alvr_sockets::{
     LdcTcpReceiver, LdcTcpSender, RequestPacket, ResponsePacket, SsePacket, CONTROL_PORT,
-    HANDSHAKE_PACKET_SIZE_BYTES, LOCAL_IP, REQUEST_STREAM, SSE_STREAM,
+    HANDSHAKE_PACKET_SIZE_BYTES, HANDSHAKE_STREAM, KEEPALIVE_INTERVAL, LOCAL_IP, REQUEST_STREAM,
+    SSE_STREAM,
 };
 use futures::stream::Scan;
 use serde::{de::DeserializeOwned, Serialize};
@@ -9,8 +10,12 @@ use std::{
     io::ErrorKind,
     marker::PhantomData,
     net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket},
-    sync::{mpsc, Arc},
-    time::Duration,
+    sync::{
+        mpsc::{self, RecvError},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 pub struct AnnouncerSocket {
@@ -26,7 +31,7 @@ impl AnnouncerSocket {
         let mut packet = [0; 56];
         packet[0..ALVR_NAME.len()].copy_from_slice(ALVR_NAME.as_bytes());
         packet[16..24].copy_from_slice(&alvr_common::protocol_id().to_le_bytes());
-        packet[24..hostname.len()].copy_from_slice(hostname.as_bytes());
+        packet[24..24 + hostname.len()].copy_from_slice(hostname.as_bytes());
 
         Ok(Self { socket, packet })
     }
@@ -40,46 +45,37 @@ impl AnnouncerSocket {
 }
 
 pub struct RequestSocket {
-    send_socket: LdcTcpSender,
+    send_socket: Arc<Mutex<LdcTcpSender>>,
     response_receiver: mpsc::Receiver<Vec<u8>>,
+    last_socket_send: Arc<Mutex<Instant>>,
 }
 
 impl RequestSocket {
     pub fn request(&mut self, message: RequestPacket) -> IntResult<ResponsePacket> {
         let buffer = bincode::serialize(&message).map_err(to_int_e!())?;
 
+        *self.last_socket_send.lock() = Instant::now();
         self.send_socket
+            .lock()
             .send(REQUEST_STREAM, &buffer)
             .map_err(int_e!())?;
 
-        // the SSE end will send a None packet to signal failure
-        let buffer = self.response_receiver.recv().map_err(to_int_e!())?;
-        bincode::deserialize(&buffer).map_err(to_int_e!())
+        match self.response_receiver.recv() {
+            Ok(buffer) => bincode::deserialize(&buffer).map_err(to_int_e!()),
+            Err(RecvError) => interrupt(),
+        }
     }
 }
 
 pub struct SseSocket {
-    receive_socket: LdcTcpReceiver,
-    response_sender: mpsc::SyncSender<Vec<u8>>,
+    receiver: mpsc::Receiver<Vec<u8>>,
 }
 
 impl SseSocket {
-    pub fn poll(&mut self) -> IntResult<SsePacket> {
-        loop {
-            let (stream_id, buffer) = self.receive_socket.recv().map_err(int_e!())?;
-
-            if stream_id == SSE_STREAM {
-                let message = bincode::deserialize(&buffer).map_err(to_int_e!())?;
-                self.receive_socket.push_buffer(stream_id, buffer);
-
-                break Ok(message);
-            } else {
-                // stream_id == REQUEST_STREAM
-                self.response_sender.send(buffer).map_err(to_int_e!())?;
-                // Note: no need to push back the buffer, it is consumed
-
-                continue;
-            }
+    pub fn recv(&mut self) -> IntResult<SsePacket> {
+        match self.receiver.recv() {
+            Ok(buffer) => bincode::deserialize(&buffer).map_err(to_int_e!()),
+            Err(RecvError) => interrupt(),
         }
     }
 }
@@ -121,12 +117,11 @@ impl ControlListenerSocket {
 
         socket.set_nonblocking(true).map_err(to_int_e!())?; // check if necessary
 
-        let send_socket = LdcTcpSender::new(
+        let send_socket = Arc::new(Mutex::new(LdcTcpSender::new(
             socket.try_clone().map_err(to_int_e!())?,
             Arc::clone(&self.running),
-        );
+        )));
         let mut receive_socket = LdcTcpReceiver::new(socket, Arc::clone(&self.running));
-        let (response_sender, response_receiver) = mpsc::sync_channel(0);
 
         // Check server compatibility
         let (_, packet) = receive_socket.recv().map_err(int_e!())?;
@@ -139,14 +134,48 @@ impl ControlListenerSocket {
             return Ok(ScanResult::MismatchedVersion);
         }
 
+        let (response_sender, response_receiver) = mpsc::sync_channel(0);
+        let (sse_sender, sse_receiver) = mpsc::sync_channel(0);
+
+        let last_socket_send = Arc::new(Mutex::new(Instant::now()));
+
         let request_socket = RequestSocket {
-            send_socket,
+            send_socket: Arc::clone(&send_socket),
             response_receiver,
+            last_socket_send: Arc::clone(&last_socket_send),
         };
         let sse_socket = SseSocket {
-            receive_socket,
-            response_sender,
+            receiver: sse_receiver,
         };
+
+        // Keepalive
+        thread::spawn(move || -> IntResult {
+            loop {
+                thread::sleep(KEEPALIVE_INTERVAL);
+
+                let mut last_socket_send = last_socket_send.lock();
+                let now = Instant::now();
+                if now - *last_socket_send > KEEPALIVE_INTERVAL {
+                    *last_socket_send = now;
+                    send_socket.lock().send(HANDSHAKE_STREAM, &[])?;
+                }
+            }
+        });
+
+        // The Poller polls packets for both requests and sse. Having a separate entity for polling
+        // packets prevents stalling when making requests as a response of a sse.
+        thread::spawn(move || -> IntResult {
+            loop {
+                let (stream_id, buffer) = receive_socket.recv().map_err(int_e!())?;
+
+                if stream_id == REQUEST_STREAM {
+                    response_sender.send(buffer).map_err(to_int_e!())?;
+                } else if stream_id == SSE_STREAM {
+                    sse_sender.send(buffer).map_err(to_int_e!())?;
+                }
+                // else: it may be a keepalive packet
+            }
+        });
 
         Ok(ScanResult::Connected {
             server_ip: server_address.ip(),

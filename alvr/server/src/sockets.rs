@@ -2,18 +2,20 @@ use alvr_common::{parking_lot::Mutex, prelude::*, RelaxedAtomic, ALVR_NAME};
 use alvr_events::EventType;
 use alvr_sockets::{
     LdcTcpReceiver, LdcTcpSender, RequestPacket, ResponsePacket, SsePacket, CONTROL_PORT,
-    HANDSHAKE_PACKET_SIZE_BYTES, HANDSHAKE_STREAM, LOCAL_IP, REQUEST_STREAM, SSE_STREAM,
+    HANDSHAKE_PACKET_SIZE_BYTES, HANDSHAKE_STREAM, KEEPALIVE_INTERVAL, LOCAL_IP, REQUEST_STREAM,
+    SSE_STREAM,
 };
 use std::{
     io::ErrorKind,
     net::{IpAddr, TcpStream, UdpSocket},
     sync::Arc,
+    thread,
+    time::Instant,
 };
 
 pub struct WelcomeSocket {
     socket: UdpSocket,
     buffer: [u8; HANDSHAKE_PACKET_SIZE_BYTES],
-    expected_name: [u8; 16],
 }
 
 impl WelcomeSocket {
@@ -21,18 +23,14 @@ impl WelcomeSocket {
         let socket = UdpSocket::bind((LOCAL_IP, CONTROL_PORT)).map_err(err!())?;
         socket.set_nonblocking(true).map_err(err!())?;
 
-        let mut expected_name = [0; 16];
-        expected_name.copy_from_slice(ALVR_NAME.as_bytes());
-
         Ok(Self {
             socket,
             buffer: [0; HANDSHAKE_PACKET_SIZE_BYTES],
-            expected_name,
         })
     }
 
     // Returns: client IP, client hostname
-    pub fn recv_non_blocking(&self) -> IntResult<(IpAddr, String)> {
+    pub fn recv_non_blocking(&mut self) -> IntResult<(String, IpAddr)> {
         let (size, address) = match self.socket.recv_from(&mut self.buffer) {
             Ok(pair) => pair,
             Err(e) => {
@@ -45,8 +43,8 @@ impl WelcomeSocket {
         };
 
         if size == HANDSHAKE_PACKET_SIZE_BYTES
-            && &self.buffer[..4] == ALVR_NAME.as_bytes()
-            && self.buffer[4..16].iter().all(|b| *b == 0)
+            && &self.buffer[..ALVR_NAME.len()] == ALVR_NAME.as_bytes()
+            && self.buffer[ALVR_NAME.len()..16].iter().all(|b| *b == 0)
         {
             let mut protocol_id_bytes = [0; 8];
             protocol_id_bytes.copy_from_slice(&self.buffer[16..24]);
@@ -66,7 +64,7 @@ impl WelcomeSocket {
                 .trim_end_matches('\x00')
                 .to_owned();
 
-            Ok((address.ip(), hostname))
+            Ok((hostname, address.ip()))
         } else if &self.buffer[..16] == b"\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00ALVR" {
             alvr_events::send_event(EventType::ClientFoundWrongVersion("v14 to v19".into()));
 
@@ -84,13 +82,16 @@ impl WelcomeSocket {
     }
 }
 
-pub struct ServerResponseSocket {
+pub struct ResponseSocket {
     receive_socket: LdcTcpReceiver,
     send_socket: Arc<Mutex<LdcTcpSender>>,
+    last_socket_send: Arc<Mutex<Instant>>,
 }
 
-impl ServerResponseSocket {
-    pub fn poll(&mut self, mut callback: impl FnMut(RequestPacket) -> ResponsePacket) -> IntResult {
+impl ResponseSocket {
+    // Poll requests and send responses. The callback needs to return as soon as possible and events
+    // cannpt be generated within; instead spawn a new thread if necessary
+    pub fn poll(&mut self, callback: impl FnOnce(RequestPacket) -> ResponsePacket) -> IntResult {
         let (stream_id, buffer) = self.receive_socket.recv().map_err(int_e!())?;
 
         debug_assert_eq!(stream_id, REQUEST_STREAM);
@@ -100,31 +101,33 @@ impl ServerResponseSocket {
         self.receive_socket.push_buffer(stream_id, buffer);
 
         let buffer = bincode::serialize(&response).map_err(to_int_e!())?;
+        *self.last_socket_send.lock() = Instant::now();
         self.send_socket
             .lock()
-            .send(stream_id, &buffer)
+            .send(REQUEST_STREAM, &buffer)
             .map_err(int_e!())
     }
 }
 
-pub struct ServerSseSocket {
+pub struct SseSocket {
     send_socket: Arc<Mutex<LdcTcpSender>>,
+    last_socket_send: Arc<Mutex<Instant>>,
 }
 
-impl ServerSseSocket {
+impl SseSocket {
     pub fn send(&mut self, event: SsePacket) -> IntResult {
         let buffer = bincode::serialize(&event).map_err(to_int_e!())?;
+        *self.last_socket_send.lock() = Instant::now();
         self.send_socket.lock().send(SSE_STREAM, &buffer)
     }
 }
 
 // Try to connect to any client. If returns None if all fail.
-pub fn split_server_control_socket(
-    client_ips: &[IpAddr],
+pub fn split_server_control_socket<'a>(
+    client_ips: impl Iterator<Item = &'a IpAddr>,
     running: Arc<RelaxedAtomic>,
-) -> IntResult<(IpAddr, ServerResponseSocket, ServerSseSocket)> {
+) -> IntResult<(IpAddr, ResponseSocket, SseSocket)> {
     let client_addresses = client_ips
-        .iter()
         .map(|&ip| (ip, CONTROL_PORT).into())
         .collect::<Vec<_>>();
 
@@ -143,7 +146,7 @@ pub fn split_server_control_socket(
 
     let client_address = socket.peer_addr().map_err(to_int_e!())?;
 
-    let send_socket = LdcTcpSender::new(
+    let mut send_socket = LdcTcpSender::new(
         socket.try_clone().map_err(to_int_e!())?,
         Arc::clone(&running),
     );
@@ -158,12 +161,33 @@ pub fn split_server_control_socket(
         .map_err(int_e!())?;
 
     let send_socket = Arc::new(Mutex::new(send_socket));
+    let last_socket_send = Arc::new(Mutex::new(Instant::now()));
 
-    let response_socket = ServerResponseSocket {
+    let response_socket = ResponseSocket {
         send_socket: Arc::clone(&send_socket),
         receive_socket,
+        last_socket_send: Arc::clone(&last_socket_send),
     };
-    let sse_socket = ServerSseSocket { send_socket };
+    let sse_socket = SseSocket {
+        send_socket: Arc::clone(&send_socket),
+        last_socket_send: Arc::clone(&last_socket_send),
+    };
+
+    // Keepalive
+    thread::spawn(move || -> IntResult {
+        loop {
+            // wait at the start instead of end of scope: make sure last_socket_send is locked for
+            // as little as possible
+            thread::sleep(KEEPALIVE_INTERVAL);
+
+            let mut last_socket_send = last_socket_send.lock();
+            let now = Instant::now();
+            if now - *last_socket_send > KEEPALIVE_INTERVAL {
+                *last_socket_send = now;
+                send_socket.lock().send(HANDSHAKE_STREAM, &[])?;
+            }
+        }
+    });
 
     Ok((client_address.ip(), response_socket, sse_socket))
 }

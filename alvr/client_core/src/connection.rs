@@ -45,9 +45,9 @@ use crate::audio;
 #[cfg(not(target_os = "android"))]
 use alvr_audio as audio;
 
-const INITIAL_MESSAGE: &str = "Searching for server...\n(open ALVR on your PC)";
+const INITIAL_MESSAGE: &str =
+    "Searching for server...\nOpen ALVR on your PC then click \"Trust\"\nnext to the client entry";
 const NETWORK_UNREACHABLE_MESSAGE: &str = "Cannot connect to the internet";
-const CLIENT_UNTRUSTED_MESSAGE: &str = "On the PC, click \"Trust\"\nnext to the client entry";
 const INCOMPATIBLE_VERSIONS_MESSAGE: &str = concat!(
     "Server and client have\n",
     "incompatible types.\n",
@@ -118,13 +118,17 @@ fn set_lobby_message(message: &str) {
 pub fn connection_lifecycle_loop(
     default_view_resolution: UVec2,
     supported_refresh_rates: Vec<f32>,
-) {
+) -> IntResult {
     set_lobby_message(INITIAL_MESSAGE);
 
     loop {
+        check_interrupt!(IS_ALIVE.value());
+
+        error!("begin connection loop!");
+
         match connection_pipeline(default_view_resolution, supported_refresh_rates.clone()) {
             Ok(()) => continue,
-            Err(InterruptibleError::Interrupted) => return,
+            Err(InterruptibleError::Interrupted) => return Ok(()),
             Err(InterruptibleError::Other(e)) => {
                 let message = format!("Connection error:\n{e}\nCheck the PC for more details");
                 error!("{message}");
@@ -152,6 +156,8 @@ fn connection_pipeline(
 
             if let Err(e) = announcer_socket.broadcast() {
                 warn!("Broadcast error: {e}");
+
+                error!("Broadcast error: {e}");
                 set_lobby_message(NETWORK_UNREACHABLE_MESSAGE);
 
                 thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
@@ -160,6 +166,8 @@ fn connection_pipeline(
 
                 return Ok(());
             }
+
+            error!("ok broadcast!");
 
             match listener_socket.scan() {
                 Ok(ScanResult::Connected {
@@ -172,8 +180,7 @@ fn connection_pipeline(
                     warn!("Found server with wrong version");
                     set_lobby_message(INCOMPATIBLE_VERSIONS_MESSAGE);
                 }
-                Err(InterruptibleError::Interrupted) => (), // Interrupts here are recoverable
-                e => (),
+                Err(e) => debug!("TCP listener error: {e}"),
             };
 
             thread::sleep(DISCOVERY_RETRY_PAUSE);
@@ -181,12 +188,17 @@ fn connection_pipeline(
     };
     *REQUEST_SOCKET.lock() = Some(request_socket);
 
+    error!("connected tcp!");
+
     let microphone_sample_rate =
         AudioDevice::new(None, AudioDeviceId::Default, AudioDeviceType::Input)
             .unwrap()
             .input_sample_rate()
             .unwrap();
+    error!("got mic sample rate");
+
     // Advertise this client as streaming-capable
+    error!("sending client caps");
     request(RequestPacket::ClientCapabilities(Some(
         VideoStreamingCapabilities {
             default_view_resolution,
@@ -195,14 +207,16 @@ fn connection_pipeline(
         },
     )))
     .map_err(int_e!())?;
+    error!("client caps sent");
 
     // the stream socket is still async and requires tokio
     let mut runtime = None;
 
     loop {
-        match sse_socket.poll()? {
+        match sse_socket.recv()? {
             SsePacket::StartStreaming(config_packet) => {
-                runtime = None;
+                SHOULD_STREAM.set(false);
+                drop(runtime.take());
 
                 SHOULD_STREAM.set(true);
 
@@ -224,9 +238,14 @@ fn connection_pipeline(
 
                 break Ok(());
             }
+            SsePacket::ServerDisconnecting => {
+                info!("Server gracefully disconnecting");
+                set_lobby_message(SERVER_DISCONNECTED_MESSAGE);
+
+                break Ok(());
+            }
             _ => (),
         }
-        // let fjdks = sse_socket.
     }
 }
 
@@ -295,7 +314,7 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
     .await
     .map_err(to_int_e!())?;
 
-    request(RequestPacket::StreamSocketReady).map_err(int_e!())?;
+    request(RequestPacket::ClientStreamSocketReady).map_err(int_e!())?;
 
     let stream_socket = tokio::select! {
         res = stream_socket_builder.accept_from_server(
@@ -307,6 +326,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         }
     };
     let stream_socket = Arc::new(stream_socket);
+
+    set_lobby_message(STREAM_STARTING_MESSAGE);
 
     unsafe {
         crate::setStreamConfig(crate::StreamConfigInput {
