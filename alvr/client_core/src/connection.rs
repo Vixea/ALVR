@@ -195,10 +195,8 @@ fn connection_pipeline(
             .unwrap()
             .input_sample_rate()
             .unwrap();
-    error!("got mic sample rate");
 
     // Advertise this client as streaming-capable
-    error!("sending client caps");
     request(RequestPacket::ClientCapabilities(Some(
         VideoStreamingCapabilities {
             default_view_resolution,
@@ -215,6 +213,7 @@ fn connection_pipeline(
     loop {
         match sse_socket.recv()? {
             SsePacket::StartStreaming(config_packet) => {
+                info!("start streaming event");
                 SHOULD_STREAM.set(false);
                 drop(runtime.take());
 
@@ -222,8 +221,12 @@ fn connection_pipeline(
 
                 let new_runtime = Runtime::new().unwrap();
 
-                new_runtime
-                    .spawn(async move { streaming_pipeline(server_ip, config_packet).await });
+                new_runtime.spawn(async move {
+                    show_err(streaming_pipeline(server_ip, config_packet).await);
+                    SHOULD_STREAM.set(false);
+                    drop(runtime.take());
+                    
+                });
 
                 runtime = Some(new_runtime);
             }
@@ -283,6 +286,7 @@ fn on_server_connected(
 }
 
 async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket) -> IntResult {
+    error!("streaming_pipeline 1");
     let settings = {
         let session_json = match request(RequestPacket::Session).map_err(int_e!())? {
             ResponsePacket::Session(session) => session,
@@ -296,6 +300,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         session_desc.to_settings()
     };
 
+    error!("streaming_pipeline 2");
+
     // todo: make event-based
     {
         let mut config = platform::load_config();
@@ -307,6 +313,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         settings.connection.statistics_history_size as _,
     ));
 
+    error!("streaming_pipeline 3");
+
     let stream_socket_builder = StreamSocketBuilder::listen_for_server(
         settings.connection.stream_port,
         settings.connection.stream_protocol,
@@ -315,6 +323,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
     .map_err(to_int_e!())?;
 
     request(RequestPacket::ClientStreamSocketReady).map_err(int_e!())?;
+
+    error!("streaming_pipeline 4");
 
     let stream_socket = tokio::select! {
         res = stream_socket_builder.accept_from_server(
@@ -328,6 +338,7 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
     let stream_socket = Arc::new(stream_socket);
 
     set_lobby_message(STREAM_STARTING_MESSAGE);
+    error!("streaming_pipeline 5");
 
     unsafe {
         crate::setStreamConfig(crate::StreamConfigInput {
@@ -403,6 +414,7 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
             .map(|c| c.prediction_multiplier)
             .unwrap_or_default(),
     );
+    error!("streaming_pipeline 6");
 
     let tracking_send_loop = {
         let mut socket_sender = stream_socket
@@ -413,6 +425,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
             *TRACKING_SENDER.lock() = Some(data_sender);
             while let Some(tracking) = data_receiver.recv().await {
+                error!("tracking");
+
                 socket_sender
                     .send_buffer(socket_sender.new_buffer(&tracking, 0)?)
                     .await
@@ -463,6 +477,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         async move {
             loop {
                 let packet = receiver.recv().await?;
+
+                error!("video packet");
 
                 let mut buffer = vec![0_u8; mem::size_of::<VideoFrame>() + packet.buffer.len()];
                 let header = VideoFrame {
@@ -528,7 +544,7 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
                 let mut idr_request_deadline = None;
 
                 while let Ok(mut data) = legacy_receive_data_receiver.recv() {
-                    if !SHOULD_STREAM.value() {
+                    if !SHOULD_STREAM.value() || !IS_RESUMED.value() {
                         break;
                     }
 
@@ -604,20 +620,8 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         Box::pin(future::pending())
     };
 
-    let keepalive_sender_loop = async move {
-        loop {
-            let res = request(RequestPacket::KeepAlive);
-            if let Err(e) = res {
-                info!("Server disconnected. Cause: {e}");
-                set_lobby_message(SERVER_DISCONNECTED_MESSAGE);
-                break Ok(());
-            }
-
-            time::sleep(NETWORK_KEEPALIVE_INTERVAL).await;
-        }
-    };
-
     let receive_loop = async move { stream_socket.receive_loop().await };
+    error!("streaming_pipeline 7");
 
     // Run many tasks concurrently. Threading is managed by the runtime, for best performance.
     tokio::select! {
@@ -636,9 +640,6 @@ async fn streaming_pipeline(server_ip: IpAddr, config_packet: StreamConfigPacket
         res = spawn_cancelable(video_receive_loop) => res,
         res = spawn_cancelable(haptics_receive_loop) => res,
         res = legacy_stream_socket_loop => res.map_err(to_int_e!())?,
-
-        // keep these loops on the current task
-        res = keepalive_sender_loop => res,
     }
     .map_err(to_int_e!())
 }

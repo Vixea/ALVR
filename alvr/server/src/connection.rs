@@ -147,6 +147,8 @@ fn connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
             warn!("Connection error for {client_hostname}: {e}")
         }
 
+        error!("removed client connection");
+
         CLIENT_DATA.lock().remove(&client_hostname);
     });
 
@@ -166,8 +168,6 @@ fn response_loop(
                 serde_json::to_string(SERVER_DATA_MANAGER.lock().session()).unwrap(),
             ),
             RequestPacket::ClientCapabilities(client_capabilities) => {
-                error!("got client capabilities");
-
                 CLIENT_DATA
                     .lock()
                     .get_mut(client_hostname)
@@ -634,6 +634,7 @@ fn request_video_streaming(client_hostname: &str) -> IntResult {
 
                 interrupt()
             } else {
+                error!("start streaming event");
                 connection_data
                     .sse_socket
                     .send(SsePacket::StartStreaming(StreamConfigPacket {
@@ -675,6 +676,8 @@ impl Drop for StreamCloseGuard {
 }
 
 async fn streaming_loop(client_hostname: &str, client_ip: IpAddr) -> StrResult {
+    error!("streaming_loop 1");
+
     let settings = SERVER_DATA_MANAGER.lock().session().to_settings();
 
     let stream_socket = tokio::select! {
@@ -694,6 +697,8 @@ async fn streaming_loop(client_hostname: &str, client_ip: IpAddr) -> StrResult {
         settings.connection.statistics_history_size as _,
     ));
 
+    error!("streaming_loop 2");
+
     alvr_events::send_event(EventType::ClientConnected);
 
     {
@@ -712,6 +717,8 @@ async fn streaming_loop(client_hostname: &str, client_ip: IpAddr) -> StrResult {
 
     unsafe { crate::InitializeStreaming() };
     let _stream_guard = StreamCloseGuard;
+
+    error!("streaming_loop 2");
 
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
         let device = AudioDevice::new(
@@ -966,6 +973,8 @@ async fn streaming_loop(client_hostname: &str, client_ip: IpAddr) -> StrResult {
     };
 
     let receive_loop = async move { stream_socket.receive_loop().await };
+
+    error!("streaming_loop 3");
 
     tokio::select! {
         // Spawn new tasks and let the runtime manage threading

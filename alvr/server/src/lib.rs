@@ -351,6 +351,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
             }
 
             if let Err(InterruptibleError::Other(e)) = connection::handshake_loop() {
+                error!("Connection thread closed: {e}");
                 warn!("Connection thread closed: {e}");
             }
         });
