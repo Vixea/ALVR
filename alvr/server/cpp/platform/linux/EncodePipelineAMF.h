@@ -93,6 +93,7 @@ private:
     int m_renderHeight;
 
     bool m_hasQueryTimeout = false;
+    bool m_isIdr = false;
     
     amf::AMFBufferPtr m_frameBuffer;
     uint64_t m_targetTimestampNs;

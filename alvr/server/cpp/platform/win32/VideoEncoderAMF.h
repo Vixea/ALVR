@@ -51,13 +51,13 @@ protected:
 
 typedef AMFPipeline* AMFPipelinePtr;
 
-// Video encoder for AMD VCE.
-class VideoEncoderVCE : public VideoEncoder
+// Video encoder for AMD VCE or VCN.
+class VideoEncoderAMF : public VideoEncoder
 {
 public:
-	VideoEncoderVCE(std::shared_ptr<CD3DRender> pD3DRender
+	VideoEncoderAMF(std::shared_ptr<CD3DRender> pD3DRender
 		, int width, int height);
-	~VideoEncoderVCE();
+	~VideoEncoderAMF();
 
 	void Initialize();
 	void Shutdown();
@@ -95,6 +95,7 @@ private:
 	int m_bitrateInMBits;
 
 	bool m_hasQueryTimeout;
+	bool m_isIdr = false;
 
 	void ApplyFrameProperties(const amf::AMFSurfacePtr &surface, bool insertIDR);
 };

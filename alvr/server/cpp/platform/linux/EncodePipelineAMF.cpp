@@ -392,14 +392,7 @@ bool EncodePipelineAMF::GetEncoded(FramePacket &packet)
     packet.data = reinterpret_cast<uint8_t *>(m_frameBuffer->GetNative());
     packet.size = static_cast<int>(m_frameBuffer->GetSize());
     packet.pts = m_targetTimestampNs;
-    std::uint64_t type;
-    if (m_codec == ALVR_CODEC_H264) {
-        m_frameBuffer->GetProperty(AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE, &type);
-        packet.isIDR = type == AMF_VIDEO_ENCODER_OUTPUT_DATA_TYPE_IDR;
-    } else {
-        m_frameBuffer->GetProperty(AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE, &type);
-        packet.isIDR = type == AMF_VIDEO_ENCODER_HEVC_OUTPUT_DATA_TYPE_IDR;
-    }
+    packet.isIDR = m_isIdr;
 
     return true;
 }
@@ -414,10 +407,12 @@ void EncodePipelineAMF::SetParams(FfiDynamicEncoderParams params)
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_TARGET_BITRATE, bitRateIn);
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_PEAK_BITRATE, bitRateIn);
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, bitRateIn / m_refreshRate * 1.1);
+        m_isIdr = true;
     } else {
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE, bitRateIn);
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE, bitRateIn);
         m_amfComponents.back()->SetProperty(AMF_VIDEO_ENCODER_HEVC_VBV_BUFFER_SIZE, bitRateIn / m_refreshRate * 1.1);
+        m_isIdr = true;
     }
 }
 
