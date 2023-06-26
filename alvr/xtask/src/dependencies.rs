@@ -101,17 +101,17 @@ pub fn prepare_windows_deps(skip_admin_priv: bool) {
 pub fn build_ffmpeg_linux(nvenc_flag: bool) {
     let sh = Shell::new().unwrap();
 
-    let download_path = afs::deps_dir().join("linux");
+    let ffmpeg_download_path = afs::deps_dir().join("linux");
     command::download_and_extract_zip(
         &sh,
         "https://codeload.github.com/FFmpeg/FFmpeg/zip/n6.0",
-        &download_path,
+        &ffmpeg_download_path,
     )
     .unwrap();
 
-    let final_path = download_path.join("ffmpeg");
+    let final_path = ffmpeg_download_path.join("ffmpeg");
 
-    fs::rename(download_path.join("FFmpeg-n6.0"), &final_path).unwrap();
+    fs::rename(ffmpeg_download_path.join("FFmpeg-n6.0"), &final_path).unwrap();
 
     let flags = [
         "--enable-gpl",
@@ -142,7 +142,7 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
     //
     let config_vars = r#"-Wl,-rpath,'$$$$ORIGIN'"#;
 
-    let _push_guard = sh.push_dir(final_path);
+    //let _push_guard = sh.push_dir(final_path);
     let _env_vars = sh.push_env("LDSOFLAGS", config_vars);
 
     if nvenc_flag {
@@ -157,14 +157,43 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
         */
         #[cfg(target_os = "linux")]
         {
+            let ffnvcodec_download_path = afs::deps_dir().join("linux");
+            command::download_and_extract_zip(
+                &sh,
+                "https://github.com/FFmpeg/nv-codec-headers/archive/refs/heads/master.zip",
+                &ffnvcodec_download_path,
+            )
+            .unwrap();
+            let final_path = ffmpeg_download_path.join("nv-codec-headers");
+            fs::rename(ffnvcodec_download_path.join("nv-codec-headers-master"), &final_path).unwrap();
+            sh.change_dir(final_path);
+            // Patches ffnvcodec-headers for changing the pkgconfig file
+            //let ffnvcodec_command = "for p in ../../../alvr/xtask/patches/ffnvcodec/*; do patch -p1 < $p; done";
+            println!("{}", sh.current_dir().to_string_lossy());
+            std::process::Command::new("bash")
+                .args(&[
+                    "/C",
+                    "for p in ../../../alvr/xtask/patches/ffnvcodec/*; do patch -p1 < $p; done",
+                ])
+                .output()
+                .expect("failed to execute process");
+            //cmd!(sh, "/usr/bin/bash -c {ffnvcodec_command}").run().unwrap();
+            std::process::Command::new("bash")
+            .args(&[
+                "/C",
+                "make install",
+            ])
+            .output()
+            .expect("failed to execute process");
+
             let cuda = pkg_config::Config::new().probe("cuda").unwrap();
-            let include_flags = cuda
+            let cuda_include_flags = cuda
                 .include_paths
                 .iter()
                 .map(|path| format!("-I{}", path.to_string_lossy()))
                 .reduce(|a, b| format!("{a} {b}"))
                 .expect("pkg-config cuda entry to have include-paths");
-            let link_flags = cuda
+            let cuda_link_flags = cuda
                 .link_paths
                 .iter()
                 .map(|path| format!("-L{}", path.to_string_lossy()))
@@ -178,8 +207,8 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
                 "--enable-cuda-nvcc",
                 "--enable-libnpp",
                 "--nvccflags=\"-gencode arch=compute_52,code=sm_52 -O2\"",
-                &format!("--extra-cflags=\"{include_flags}\""),
-                &format!("--extra-ldflags=\"{link_flags}\""),
+                &format!("--extra-cflags=\"{cuda_include_flags}\""),
+                &format!("--extra-ldflags=\"{cuda_link_flags}\""),
             ];
 
             let flags_combined = flags.join(" ");
@@ -197,7 +226,7 @@ pub fn build_ffmpeg_linux(nvenc_flag: bool) {
     }
 
     // Patches ffmpeg for workarounds and patches that have yet to be unstreamed
-    let ffmpeg_command = "for p in ../../../alvr/xtask/patches/*; do patch -p1 < $p; done";
+    let ffmpeg_command = "for p in ../../../alvr/xtask/patches/ffmpeg/*; do patch -p1 < $p; done";
     cmd!(sh, "bash -c {ffmpeg_command}").run().unwrap();
 
     let nproc = cmd!(sh, "nproc").read().unwrap();
