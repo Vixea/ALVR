@@ -18,7 +18,7 @@ class CD3DRender;
 #endif
 class PoseHistory;
 
-class Hmd : public TrackedDevice, public vr::ITrackedDeviceServerDriver, vr::IVRDisplayComponent {
+class Hmd : public TrackedDevice, public vr::ITrackedDeviceServerDriver, public vr::IVRVirtualDisplay, vr::IVRDisplayComponent {
   public:
     Hmd();
 
@@ -59,6 +59,18 @@ class Hmd : public TrackedDevice, public vr::ITrackedDeviceServerDriver, vr::IVR
 
     std::shared_ptr<CEncoder> m_encoder;
     std::shared_ptr<PoseHistory> m_poseHistory;
+
+    // IVRVirtualDisplay
+
+	/** Submits final backbuffer for display. */
+	virtual void Present( const vr::PresentInfo_t *pPresentInfo, uint32_t unPresentInfoSize );
+
+	/** Block until the last presented buffer start scanning out. */
+	virtual void WaitForPresent();
+
+	/** Provides timing data for synchronizing with display. */
+	virtual bool GetTimeSinceLastVsync( float *pfSecondsSinceLastVsync, uint64_t *pulFrameCounter );
+
 
   private:
     FfiViewsConfig views_config;

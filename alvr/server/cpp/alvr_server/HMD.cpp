@@ -187,6 +187,10 @@ void *Hmd::GetComponent(const char *component_name_and_version) {
     }
 #endif
 
+    if (name_and_vers == vr::IVRVirtualDisplay_Version) {
+        return (vr::IVRVirtualDisplay *)this; 
+    }
+
     return nullptr;
 }
 
@@ -341,4 +345,16 @@ void Hmd::GetProjectionRaw(vr::EVREye eye, float *left, float *right, float *top
 
 vr::DistortionCoordinates_t Hmd::ComputeDistortion(vr::EVREye, float u, float v) {
     return {{u, v}, {u, v}, {u, v}};
+}
+
+void Hmd::Present( const vr::PresentInfo_t *pPresentInfo, uint32_t unPresentInfoSize ) {
+
+}
+
+void Hmd::WaitForPresent() {
+
+}
+
+bool Hmd::GetTimeSinceLastVsync( float *pfSecondsSinceLastVsync, uint64_t *pulFrameCounter ) {
+    
 }
