@@ -35,14 +35,13 @@
 
 		void Initialize(std::shared_ptr<CD3DRender> d3dRender);
 
-		bool CopyToStaging(ID3D11Texture2D *pTexture[][2], vr::VRTextureBounds_t bounds[][2], int layerCount, bool recentering
-			, uint64_t presentationTime, uint64_t targetTimestampNs, const std::string& message, const std::string& debugText);
+		bool CopyToStaging(ID3D11Texture2D *pTexture, uint64_t presentationTime, uint64_t targetTimestampNs);
 
 		virtual void Run();
 
 		virtual void Stop();
 
-		void NewFrameReady();
+		void NewFrameReady(double flVsyncTimeInSeconds);
 
 		void WaitForEncode();
 
@@ -60,6 +59,7 @@
 		bool m_bExiting;
 		uint64_t m_presentationTime;
 		uint64_t m_targetTimestampNs;
+		double m_flVsyncTimeInSeconds;
 
 		std::shared_ptr<FrameRender> m_FrameRender;
 

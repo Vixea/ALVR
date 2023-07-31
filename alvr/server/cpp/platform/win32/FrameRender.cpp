@@ -318,7 +318,7 @@ bool FrameRender::Startup()
 }
 
 
-bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture[][2], vr::VRTextureBounds_t bounds[][2], int layerCount, bool recentering, const std::string &message, const std::string& debugText)
+bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture)
 {
 	// Set render target
 	m_pD3DRender->GetContext()->OMSetRenderTargets(1, m_pRenderTargetView.GetAddressOf(), m_pDepthStencilView.Get());
@@ -336,37 +336,8 @@ bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture[][2], vr::VRTextureBound
 	// Clear the back buffer
 	m_pD3DRender->GetContext()->ClearRenderTargetView(m_pRenderTargetView.Get(), DirectX::Colors::MidnightBlue);
 
-	// Overlay recentering texture on top of all layers.
-	int recenterLayer = -1;
-	if (recentering) {
-		recenterLayer = layerCount;
-		layerCount++;
-	}
-
-	for (int i = 0; i < layerCount; i++) {
-		ID3D11Texture2D *textures[2];
-		vr::VRTextureBounds_t bound[2];
-
-		if (i == recenterLayer) {
-			textures[0] = (ID3D11Texture2D *)m_recenterTexture.Get();
-			textures[1] = (ID3D11Texture2D *)m_recenterTexture.Get();
-			bound[0].uMin = bound[0].vMin = bound[1].uMin = bound[1].vMin = 0.0f;
-			bound[0].uMax = bound[0].vMax = bound[1].uMax = bound[1].vMax = 1.0f;
-		}
-		else {
-			textures[0] = pTexture[i][0];
-			textures[1] = pTexture[i][1];
-			bound[0] = bounds[i][0];
-			bound[1] = bounds[i][1];
-		}
-		if (textures[0] == NULL || textures[1] == NULL) {
-			Debug("Ignore NULL layer. layer=%d/%d%s%s\n", i, layerCount
-				, recentering ? L" (recentering)" : L"", !message.empty() ? L" (message)" : L"");
-			continue;
-		}
-
 		D3D11_TEXTURE2D_DESC srcDesc;
-		textures[0]->GetDesc(&srcDesc);
+		pTexture->GetDesc(&srcDesc);
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC SRVDesc = {};
 		SRVDesc.Format = srcDesc.Format;
@@ -376,12 +347,7 @@ bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture[][2], vr::VRTextureBound
 
 		ComPtr<ID3D11ShaderResourceView> pShaderResourceView[2];
 
-		HRESULT hr = m_pD3DRender->GetDevice()->CreateShaderResourceView(textures[0], &SRVDesc, pShaderResourceView[0].ReleaseAndGetAddressOf());
-		if (FAILED(hr)) {
-			Error("CreateShaderResourceView %p %ls\n", hr, GetErrorStr(hr).c_str());
-			return false;
-		}
-		hr = m_pD3DRender->GetDevice()->CreateShaderResourceView(textures[1], &SRVDesc, pShaderResourceView[1].ReleaseAndGetAddressOf());
+		HRESULT hr = m_pD3DRender->GetDevice()->CreateShaderResourceView(pTexture, &SRVDesc, pShaderResourceView[0].ReleaseAndGetAddressOf());
 		if (FAILED(hr)) {
 			Error("CreateShaderResourceView %p %ls\n", hr, GetErrorStr(hr).c_str());
 			return false;
@@ -402,7 +368,7 @@ bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture[][2], vr::VRTextureBound
 		// Update uv-coordinates in vertex buffer according to bounds.
 		//
 
-		SimpleVertex vertices[] =
+		/*SimpleVertex vertices[] =
 		{
 			// Left View
 			{ DirectX::XMFLOAT3(-1.0f, -1.0f, 0.5f), DirectX::XMFLOAT2(bound[0].uMin, bound[0].vMax), 0 },
@@ -414,60 +380,59 @@ bool FrameRender::RenderFrame(ID3D11Texture2D *pTexture[][2], vr::VRTextureBound
 		{ DirectX::XMFLOAT3(1.0f,  1.0f, 0.5f), DirectX::XMFLOAT2(bound[1].uMax, bound[1].vMin), 1 },
 		{ DirectX::XMFLOAT3(1.0f, -1.0f, 0.5f), DirectX::XMFLOAT2(bound[1].uMax, bound[1].vMax), 1 },
 		{ DirectX::XMFLOAT3(0.0f,  1.0f, 0.5f), DirectX::XMFLOAT2(bound[1].uMin, bound[1].vMin), 1 },
-		};
+		};*/
 
 		// TODO: Which is better? UpdateSubresource or Map
 		//m_pD3DRender->GetContext()->UpdateSubresource(m_pVertexBuffer.Get(), 0, nullptr, &vertices, 0, 0);
 
-		D3D11_MAPPED_SUBRESOURCE mapped = { 0 };
-		hr = m_pD3DRender->GetContext()->Map(m_pVertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-		if (FAILED(hr)) {
-			Error("Map %p %ls\n", hr, GetErrorStr(hr).c_str());
-			return false;
-		}
-		memcpy(mapped.pData, vertices, sizeof(vertices));
+		//D3D11_MAPPED_SUBRESOURCE mapped = { 0 };
+		//hr = m_pD3DRender->GetContext()->Map(m_pVertexBuffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+		//if (FAILED(hr)) {
+		//	Error("Map %p %ls\n", hr, GetErrorStr(hr).c_str());
+		//	return false;
+		//}
+		//memcpy(mapped.pData, vertices, sizeof(vertices));
 
-		m_pD3DRender->GetContext()->Unmap(m_pVertexBuffer.Get(), 0);
+		//m_pD3DRender->GetContext()->Unmap(m_pVertexBuffer.Get(), 0);
 
 		// Set the input layout
-		m_pD3DRender->GetContext()->IASetInputLayout(m_pVertexLayout.Get());
+		//m_pD3DRender->GetContext()->IASetInputLayout(m_pVertexLayout.Get());
 
 		//
 		// Set buffers
 		//
 
-		UINT stride = sizeof(SimpleVertex);
-		UINT offset = 0;
-		m_pD3DRender->GetContext()->IASetVertexBuffers(0, 1, m_pVertexBuffer.GetAddressOf(), &stride, &offset);
+		//UINT stride = sizeof(SimpleVertex);
+		//UINT offset = 0;
+		//m_pD3DRender->GetContext()->IASetVertexBuffers(0, 1, m_pVertexBuffer.GetAddressOf(), &stride, &offset);
 
-		m_pD3DRender->GetContext()->IASetIndexBuffer(m_pIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
-		m_pD3DRender->GetContext()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		//m_pD3DRender->GetContext()->IASetIndexBuffer(m_pIndexBuffer.Get(), DXGI_FORMAT_R16_UINT, 0);
+		//m_pD3DRender->GetContext()->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 		//
 		// Set shaders
 		//
 
-		m_pD3DRender->GetContext()->VSSetShader(m_pVertexShader.Get(), nullptr, 0);
-		m_pD3DRender->GetContext()->PSSetShader(m_pPixelShader.Get(), nullptr, 0);
+		//m_pD3DRender->GetContext()->VSSetShader(m_pVertexShader.Get(), nullptr, 0);
+		//m_pD3DRender->GetContext()->PSSetShader(m_pPixelShader.Get(), nullptr, 0);
 
-		ID3D11ShaderResourceView *shaderResourceView[2] = { pShaderResourceView[0].Get(), pShaderResourceView[1].Get() };
-		m_pD3DRender->GetContext()->PSSetShaderResources(0, 2, shaderResourceView);
+		//ID3D11ShaderResourceView *shaderResourceView[2] = { pShaderResourceView[0].Get(), pShaderResourceView[1].Get() };
+		//m_pD3DRender->GetContext()->PSSetShaderResources(0, 2, shaderResourceView);
 
-		m_pD3DRender->GetContext()->PSSetSamplers(0, 1, m_pSamplerLinear.GetAddressOf());
+		//m_pD3DRender->GetContext()->PSSetSamplers(0, 1, m_pSamplerLinear.GetAddressOf());
 		
 		//
 		// Draw
 		//
 
-		m_pD3DRender->GetContext()->DrawIndexed(VERTEX_INDEX_COUNT, 0, 0);
-	}
+		//m_pD3DRender->GetContext()->DrawIndexed(VERTEX_INDEX_COUNT, 0, 0);
 
-	if (enableColorCorrection) {
-		m_colorCorrectionPipeline->Render();
+			if (enableColorCorrection) {
+		//m_colorCorrectionPipeline->Render();
 	}
 
 	if (enableFFR) {
-		m_ffr->Render();
+		//m_ffr->Render();
 	}
 
 	m_pD3DRender->GetContext()->Flush();

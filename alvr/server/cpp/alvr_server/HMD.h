@@ -86,14 +86,26 @@ class Hmd : public TrackedDevice, public vr::ITrackedDeviceServerDriver, public 
 
     std::wstring m_adapterName;
 
+    vr::HmdQuaternion_t m_prevFramePoseRotation;
+	vr::HmdQuaternion_t m_framePoseRotation;
+    uint64_t m_presentationTime;
+	uint64_t m_targetTimestampNs;
+	uint64_t m_prevTargetTimestampNs;
+
+    //ported from valve
+    uint32_t m_nVsyncCounter;
+    double m_flLastVsyncTimeInSeconds;
+
+
 #ifdef _WIN32
     std::shared_ptr<CD3DRender> m_D3DRender;
 #endif
 
+/* TODO REMOVE
 #ifdef _WIN32
     std::shared_ptr<OvrDirectModeComponent> m_directModeComponent;
 #endif
-
+*/
     std::shared_ptr<ViveTrackerProxy> m_viveTrackerProxy;
 
     vr::DriverPose_t m_pose = {};

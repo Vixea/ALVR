@@ -75,14 +75,13 @@
 #endif
 		}
 
-		bool CEncoder::CopyToStaging(ID3D11Texture2D *pTexture[][2], vr::VRTextureBounds_t bounds[][2], int layerCount, bool recentering
-			, uint64_t presentationTime, uint64_t targetTimestampNs, const std::string& message, const std::string& debugText)
+		bool CEncoder::CopyToStaging(ID3D11Texture2D *pTexture, uint64_t presentationTime, uint64_t targetTimestampNs)
 		{
 			m_presentationTime = presentationTime;
 			m_targetTimestampNs = targetTimestampNs;
 			m_FrameRender->Startup();
 
-			m_FrameRender->RenderFrame(pTexture, bounds, layerCount, recentering, message, debugText);
+			m_FrameRender->RenderFrame(pTexture);
 			return true;
 		}
 
@@ -114,8 +113,9 @@
 			m_FrameRender.reset();
 		}
 
-		void CEncoder::NewFrameReady()
+		void CEncoder::NewFrameReady(double flVsyncTimeInSeconds )
 		{
+			m_flVsyncTimeInSeconds = flVsyncTimeInSeconds;
 			m_encodeFinished.Reset();
 			m_newFrameReady.Set();
 		}

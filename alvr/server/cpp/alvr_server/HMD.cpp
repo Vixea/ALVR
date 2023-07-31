@@ -150,8 +150,9 @@ vr::EVRInitError Hmd::Activate(vr::TrackedDeviceIndex_t unObjectId) {
             Info("Using %ls as primary graphics adapter.\n", m_adapterName.c_str());
             Info("OSVer: %ls\n", GetWindowsOSVersion().c_str());
 
-            m_directModeComponent =
-                std::make_shared<OvrDirectModeComponent>(m_D3DRender, m_poseHistory);
+            /* TODO REMOVE
+            m_directModeComponent = 
+                std::make_shared<OvrDirectModeComponent>(m_D3DRender, m_poseHistory);*/
 #endif
         }
 
@@ -180,13 +181,13 @@ void *Hmd::GetComponent(const char *component_name_and_version) {
     if (name_and_vers == vr::IVRDisplayComponent_Version) {
         return (vr::IVRDisplayComponent *)this;
     }
-
+/* TODO REMOVE
 #ifdef _WIN32
     if (name_and_vers == vr::IVRDriverDirectModeComponent_Version) {
         return m_directModeComponent.get();
     }
 #endif
-
+*/
     if (name_and_vers == vr::IVRVirtualDisplay_Version) {
         return (vr::IVRVirtualDisplay *)this; 
     }
@@ -260,7 +261,8 @@ void Hmd::StartStreaming() {
         }
         m_encoder->Start();
 
-        m_directModeComponent->SetEncoder(m_encoder);
+        // TODO REMOVE
+        //m_directModeComponent->SetEncoder(m_encoder);
 
         m_encoder->OnStreamStart();
 #elif __APPLE__
@@ -356,5 +358,8 @@ void Hmd::WaitForPresent() {
 }
 
 bool Hmd::GetTimeSinceLastVsync( float *pfSecondsSinceLastVsync, uint64_t *pulFrameCounter ) {
-    
+    *pfSecondsSinceLastVsync = ( float )( std::chrono::steady_clock::now() - m_flLastVsyncTimeInSeconds );
+	*pulFrameCounter = m_nVsyncCounter;
+
+	return true;
 }
