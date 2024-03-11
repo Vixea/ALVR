@@ -220,6 +220,8 @@ void Hmd::OnPoseUpdated(uint64_t targetTimestampNs, FfiDeviceMotion motion) {
     if (m_viveTrackerProxy)
         m_viveTrackerProxy->update();
 
+    SetDynOpenvrProps(this->device_id);
+
 #if !defined(_WIN32) && !defined(__APPLE__)
     // This has to be set after initialization is done, because something in vrcompositor is
     // setting it to 90Hz in the meantime

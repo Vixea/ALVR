@@ -284,6 +284,7 @@ void (*ReportComposed)(unsigned long long timestamp_ns, unsigned long long offse
 FfiDynamicEncoderParams (*GetDynamicEncoderParams)();
 unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char *outString);
 void (*SetOpenvrProps)(unsigned long long deviceID);
+void (*SetDynOpenvrProps)(unsigned long long deviceID);
 void (*RegisterButtons)(unsigned long long deviceID);
 void (*WaitForVSync)();
 

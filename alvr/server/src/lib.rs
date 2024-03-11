@@ -447,6 +447,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
     ReportComposed = Some(report_composed);
     GetSerialNumber = Some(openvr_props::get_serial_number);
     SetOpenvrProps = Some(openvr_props::set_device_openvr_props);
+    SetDynOpenvrProps = Some(openvr_props::set_dym_device_openvr_props);
     RegisterButtons = Some(input_mapping::register_buttons);
     GetDynamicEncoderParams = Some(get_dynamic_encoder_params);
     WaitForVSync = Some(wait_for_vsync);

@@ -129,6 +129,7 @@ extern "C" void (*ReportComposed)(unsigned long long timestamp_ns, unsigned long
 extern "C" FfiDynamicEncoderParams (*GetDynamicEncoderParams)();
 extern "C" unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char *outString);
 extern "C" void (*SetOpenvrProps)(unsigned long long deviceID);
+extern "C" void (*SetDynOpenvrProps)(unsigned long long deviceID);
 extern "C" void (*RegisterButtons)(unsigned long long deviceID);
 extern "C" void (*WaitForVSync)();
 
