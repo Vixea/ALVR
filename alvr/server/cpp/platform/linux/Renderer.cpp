@@ -1,11 +1,13 @@
 #include "Renderer.h"
 
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <cassert>
 #include <cstring>
 #include <algorithm>
+#include <vulkan/vulkan_core.h>
 
 #ifndef DRM_FORMAT_INVALID
 #define DRM_FORMAT_INVALID 0
@@ -51,40 +53,15 @@ static bool filter_modifier(uint64_t modifier)
     return true;
 }
 
-Renderer::Renderer(const VkInstance &inst, const VkDevice &dev, const VkPhysicalDevice &physDev, uint32_t queueIdx, const std::vector<const char*> &devExtensions)
-    : m_inst(inst)
-    , m_dev(dev)
-    , m_physDev(physDev)
-    , m_queueFamilyIndex(queueIdx)
-{
-    auto checkExtension = [devExtensions](const char *name) {
-        return std::find_if(devExtensions.begin(), devExtensions.end(), [name](const char *ext) { return strcmp(ext, name) == 0; }) != devExtensions.end();
-    };
-    d.haveDmaBuf = checkExtension(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
-    d.haveDrmModifiers = checkExtension(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
-    d.haveCalibratedTimestamps = checkExtension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
-
-    if (!checkExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
-        throw std::runtime_error("Vulkan: Required extension " VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME " not available");
-    }
-
-#define VK_LOAD_PFN(name) d.name = (PFN_##name) vkGetInstanceProcAddr(m_inst, #name)
-    VK_LOAD_PFN(vkImportSemaphoreFdKHR);
-    VK_LOAD_PFN(vkGetMemoryFdKHR);
-    VK_LOAD_PFN(vkGetMemoryFdPropertiesKHR);
-    VK_LOAD_PFN(vkGetImageDrmFormatModifierPropertiesEXT);
-    VK_LOAD_PFN(vkGetCalibratedTimestampsEXT);
-    VK_LOAD_PFN(vkCmdPushDescriptorSetKHR);
-#undef VK_LOAD_PFN
-
-    VkPhysicalDeviceProperties props = {};
-    vkGetPhysicalDeviceProperties(m_physDev, &props);
-    m_timestampPeriod = props.limits.timestampPeriod;
+Renderer::Renderer() {
+    
 }
 
 Renderer::~Renderer()
 {
     vkDeviceWaitIdle(m_dev);
+
+    vkDestroyInstance(m_inst, nullptr);
 
     for (const InputImage &image : m_images) {
         vkDestroyImageView(m_dev, image.view, nullptr);
@@ -111,11 +88,50 @@ Renderer::~Renderer()
     vkDestroyFence(m_dev, m_fence, nullptr);
 }
 
-void Renderer::Startup(uint32_t width, uint32_t height, VkFormat format)
+bool Renderer::Startup()
 {
-    m_format = format;
-    m_imageSize.width = width;
-    m_imageSize.height = height;
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "No Engine";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 3, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_3;
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    //TODO: get extensions, GetVulkanInstanceExtensionsRequired, GetVulkanDeviceExtensionsRequired
+
+    auto checkExtension = [devExtensions](const char *name) {
+        return std::find_if(devExtensions.begin(), devExtensions.end(), [name](const char *ext) { return strcmp(ext, name) == 0; }) != devExtensions.end();
+    };
+    d.haveDmaBuf = checkExtension(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
+    d.haveDrmModifiers = checkExtension(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
+    d.haveCalibratedTimestamps = checkExtension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+
+    if (!checkExtension(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
+        throw std::runtime_error("Vulkan: Required extension " VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME " not available");
+        return false;
+    }
+
+#define VK_LOAD_PFN(name) d.name = (PFN_##name) vkGetInstanceProcAddr(m_inst, #name)
+    VK_LOAD_PFN(vkImportSemaphoreFdKHR);
+    VK_LOAD_PFN(vkGetMemoryFdKHR);
+    VK_LOAD_PFN(vkGetMemoryFdPropertiesKHR);
+    VK_LOAD_PFN(vkGetImageDrmFormatModifierPropertiesEXT);
+    VK_LOAD_PFN(vkGetCalibratedTimestampsEXT);
+    VK_LOAD_PFN(vkCmdPushDescriptorSetKHR);
+#undef VK_LOAD_PFN
+
+    VkPhysicalDeviceProperties props = {};
+    vkGetPhysicalDeviceProperties(m_physDev, &props);
+    m_timestampPeriod = props.limits.timestampPeriod;
+
+
+    if (vkCreateInstance(&createInfo, nullptr, &m_inst) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create instance!");
+    }
 
     vkGetDeviceQueue(m_dev, m_queueFamilyIndex, 0, &m_queue);
 
@@ -177,6 +193,8 @@ void Renderer::Startup(uint32_t width, uint32_t height, VkFormat format)
     VkFenceCreateInfo fenceInfo = {};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     VK_CHECK(vkCreateFence(m_dev, &fenceInfo, nullptr, &m_fence));
+
+    return true;
 }
 
 void Renderer::AddImage(VkImageCreateInfo imageInfo, size_t memoryIndex, int imageFd, int semaphoreFd)

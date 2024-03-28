@@ -2,17 +2,17 @@
 #include "openvr_driver.h"
 #include "alvr_server/Utils.h"
 #include "CEncoder.h"
+#include "Renderer.h"
 #include "alvr_server/PoseHistory.h"
 
 #include "alvr_server/Settings.h"
 
 #include <mutex>
 
-
 class OvrDirectModeComponent : public vr::IVRDriverDirectModeComponent
 {
 public:
-	OvrDirectModeComponent(std::shared_ptr<CD3DRender> pD3DRender, std::shared_ptr<PoseHistory> poseHistory);
+	OvrDirectModeComponent(std::shared_ptr<Renderer> pVKRender, std::shared_ptr<PoseHistory> poseHistory);
 
 	void SetEncoder(std::shared_ptr<CEncoder> pEncoder);
 
@@ -41,17 +41,9 @@ public:
 	void CopyTexture(uint32_t layerCount);
 
 private:
-	std::shared_ptr<CD3DRender> m_pD3DRender;
+	std::shared_ptr<Renderer> m_pVKRender;
 	std::shared_ptr<CEncoder> m_pEncoder;
 	std::shared_ptr<PoseHistory> m_poseHistory;
-
-	// Resource for each process
-	struct ProcessResource {
-		ComPtr<ID3D11Texture2D> textures[3];
-		HANDLE sharedHandles[3];
-		uint32_t pid;
-	};
-	std::map<HANDLE, std::pair<ProcessResource *, int> > m_handleMap;
 
 	static const int MAX_LAYERS = 10;
 	int m_submitLayer;

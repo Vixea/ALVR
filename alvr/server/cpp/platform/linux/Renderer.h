@@ -5,6 +5,7 @@
 #include <array>
 #include <iostream>
 #include <vulkan/vulkan.h>
+#include <openvr.h>
 
 #define VK_CHECK(f) \
 { \
@@ -54,10 +55,10 @@ public:
         uint64_t renderComplete;
     };
 
-    explicit Renderer(const VkInstance &inst, const VkDevice &dev, const VkPhysicalDevice &physDev, uint32_t queueIdx, const std::vector<const char *> &devExtensions);
-    virtual ~Renderer();
+    Renderer();
+    ~Renderer();
 
-    void Startup(uint32_t width, uint32_t height, VkFormat format);
+    bool Startup();
 
     void AddImage(VkImageCreateInfo imageInfo, size_t memoryIndex, int imageFd, int semaphoreFd);
 

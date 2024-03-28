@@ -12,8 +12,6 @@ FrameRender::FrameRender(alvr::VkContext &ctx, init_packet &init, int fds[])
     m_quadShaderSize = QUAD_SHADER_COMP_SPV_LEN;
     m_quadShaderCode = reinterpret_cast<const uint32_t*>(QUAD_SHADER_COMP_SPV_PTR);
 
-    Startup(init.image_create_info.extent.width, init.image_create_info.extent.height, init.image_create_info.format);
-
     for (size_t i = 0; i < 3; ++i) {
         AddImage(init.image_create_info, init.mem_index, fds[2 * i], fds[2 * i + 1]);
     }

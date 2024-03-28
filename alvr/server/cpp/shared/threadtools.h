@@ -25,6 +25,21 @@ private:
 	std::thread *m_pThread;
 };
 
+// Changes by Vixea
+#ifdef __linux
+class CThreadEvent
+{
+	public:
+		CThreadEvent( bool bManualReset = false );
+		~CThreadEvent();
+		bool Wait( uint32_t nTimeoutMs = std::numeric_limits<uint32_t>::max() );
+		bool Set();
+		bool Reset();
+	private:
+};
+#endif
+// End of changes
+
 #ifdef _WIN32
 class CThreadEvent
 {
