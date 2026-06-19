@@ -70,6 +70,8 @@ private:
     vr::HmdQuaternion_t m_framePoseRotation;
     uint64_t m_targetTimestampNs;
     uint64_t m_prevTargetTimestampNs;
-
+    // Track current texture index for each eye to avoid UB with uninitialized data
+    std::map<vr::SharedTextureHandle_t, uint32_t> m_currentTextureIndex;  // [0] = left eye, [1] = right eye
+    
     std::mutex m_presentMutex;
 };

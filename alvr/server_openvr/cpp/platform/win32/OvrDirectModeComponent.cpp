@@ -5,6 +5,7 @@ OvrDirectModeComponent::OvrDirectModeComponent(
 )
     : m_pD3DRender(pD3DRender)
     , m_poseHistory(poseHistory)
+    , m_currentTextureIndex()
     , m_submitLayer(0) { }
 
 void OvrDirectModeComponent::SetEncoder(std::shared_ptr<CEncoder> pEncoder) {
@@ -142,10 +143,13 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
 ) {
     Debug("OvrDirectModeComponent::GetNextSwapTextureSetIndex");
 
-    (*pIndices)[0]++;
-    (*pIndices)[0] %= 3;
-    (*pIndices)[1]++;
-    (*pIndices)[1] %= 3;
+    for (int i = 0; i < 2; i++) {
+        auto it = m_handleMap.find(sharedTextureHandles[i]);
+        if (it != m_handleMap.end()) {
+            // Track index per texture handle, not globally
+            (*pIndices)[i] = ++m_currentTextureIndex[sharedTextureHandles[i]] % 3;
+        }
+    }
 }
 
 /** Call once per layer to draw for this frame.  One shared texture handle per eye.  Textures must
