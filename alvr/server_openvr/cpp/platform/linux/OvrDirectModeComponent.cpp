@@ -41,6 +41,12 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         Info("VrServer PID %d\n", pid);
     }
 
+    uint32_t usageFlags = static_cast<uint32_t>(
+        vk::ImageUsageFlagBits::eTransferSrc | 
+        vk::ImageUsageFlagBits::eSampled | 
+        vk::ImageUsageFlagBits::eInputAttachment
+    );
+
     for (int i = 0; i < 3; i++) {
         vr::SharedTextureHandle_t myHandle = 0;
         bool success = vr::VRIPCResourceManager()->NewSharedVulkanImage(
@@ -52,6 +58,8 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
             true,
             1,
             1,
+            0, //TODO: Is 0 correct for these flags?
+            usageFlags, //TODO: Find actual needed flags for this, possibly the ones needed?
             &myHandle
         );
 
@@ -264,4 +272,8 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     enc.present(leftIdx.value(), rightIdx.value(), m_targetTimestampNs);
 }
 
-void OvrDirectModeComponent::PostPresent(const Throttling_t* pThrottling) { /* WaitForVSync(); */ }
+void OvrDirectModeComponent::PostPresent(const Throttling_t* pThrottling) {  
+    vr::VRServerDriverHost()->VsyncEvent(0.0);
+    //Calls VsyncEnvent somewhere
+    //WaitForVSync();
+  }

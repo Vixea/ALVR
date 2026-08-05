@@ -8,6 +8,8 @@
 #include <map>
 #include <mutex>
 
+#include <vulkan/vulkan.h>
+
 #include "Encoder.hpp"
 
 class OvrDirectModeComponent : public vr::IVRDriverDirectModeComponent {
