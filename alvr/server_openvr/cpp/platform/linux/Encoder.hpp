@@ -31,12 +31,14 @@ auto makeSpecs(T... args)
         std::array<u8, Size> arr;
         memcpy(arr.data(), reinterpret_cast<u8*>(&data), arr.size());
 
+        auto const offset = static_cast<u32>(info.specData.size());
         info.specData.insert(info.specData.end(), arr.begin(), arr.end());
         info.specs.push_back({
             .constantID = index,
-            .offset = static_cast<uint32_t>(index * Size),
+            .offset = offset,
             .size = Size,
         });
+        ++index;
     };
 
     (put(args), ...);
