@@ -122,7 +122,12 @@ impl Launcher {
         }
 
         #[cfg(target_os = "linux")]
-        linux_steamvr::linux_hardware_checks();
+        {
+            if let Err(e) = linux_steamvr::maybe_unwrap_vrcompositor_launcher() {
+                error!("Could not remove a leftover vrcompositor wrapper: {e}");
+            }
+            linux_steamvr::linux_hardware_checks();
+        }
 
         let alvr_driver_dir = crate::get_filesystem_layout().openvr_driver_root_dir;
 
