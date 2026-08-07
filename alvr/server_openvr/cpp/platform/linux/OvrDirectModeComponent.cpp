@@ -233,13 +233,28 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
 
         std::array<int, 6> fds;
 
+        // Vulkan takes ownership of an fd when it imports it, so the copies kept
+        // in the handle map are only good for a single import. Hand it a dup
+        // every time or the next rebuild fails with InvalidExternalHandle.
         for (u32 i = 0; i < 3; ++i) {
             layer0Texts[i] = leftIt->second.first->sharedHandles[i];
-            fds[i] = leftIt->second.first->fds[i];
+            fds[i] = dup(leftIt->second.first->fds[i]);
         }
         for (u32 i = 0; i < 3; ++i) {
             layer0Texts[i + 3] = rightIt->second.first->sharedHandles[i];
-            fds[i + 3] = rightIt->second.first->fds[i];
+            fds[i + 3] = dup(rightIt->second.first->fds[i]);
+        }
+
+        for (u32 i = 0; i < fds.size(); ++i) {
+            if (fds[i] == -1) {
+                Error("Could not duplicate texture fd %u, skipping encoder setup\n", i);
+                for (u32 j = 0; j < fds.size(); ++j) {
+                    if (fds[j] != -1)
+                        close(fds[j]);
+                }
+                layer0Texts.fill(0);
+                return;
+            }
         }
 
         auto const& settings = Settings_Instance();
@@ -260,8 +275,15 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             .inputImgFds = fds,
         };
 
-        enc.createImages(rendererCI);
-        enc.initEncoding();
+        // Renderer and encoder setup can throw (Vulkan import, VAAPI). An
+        // exception escaping Present kills vrserver, so log and stay idle.
+        try {
+            enc.createImages(rendererCI);
+            enc.initEncoding();
+        } catch (std::exception const& e) {
+            Error("Could not set up the encoder: %s\n", e.what());
+            layer0Texts.fill(0);
+        }
 
         // We'll get em next time
         return;
