@@ -302,9 +302,13 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             enc.createImages(rendererCI);
             enc.initEncoding();
         } catch (std::exception const& e) {
-            Error("Could not set up the encoder: %s\n", e.what());
+            Error(
+                "Could not set up the encoder: %s. Staying idle until the next client connect.\n",
+                e.what()
+            );
             enc.shutdown();
             layer0Texts.fill(0);
+            m_encoderState = EncoderState::Idle;
         }
 
         // We'll get em next time
