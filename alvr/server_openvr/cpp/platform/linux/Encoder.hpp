@@ -241,6 +241,12 @@ public:
     // rebuilds from current settings. The pipeline references the frame, so
     // destroy it first. Only call this from the thread that runs present().
     void shutdown() {
+        // Drain the queue before releasing the frame. Nothing on the VAAPI
+        // path leaves Vulkan work in flight, but the Nvidia path signals the
+        // frame's semaphore from a queue submission and will need this when
+        // it comes back.
+        vkCtx.dev.waitIdle();
+
         encoder.reset();
         frame.reset();
         encoderMissingLogged = false;
@@ -278,6 +284,12 @@ public:
     void requestIdr() { idrScheduler.InsertIDR(); }
 
     ~Encoder() {
+        // The device dies in this body, but members are destroyed after the
+        // body runs. Release the pipeline and the frame first so ~VkFrame
+        // does not destroy its semaphore on a dead device.
+        encoder.reset();
+        frame.reset();
+
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
         }
