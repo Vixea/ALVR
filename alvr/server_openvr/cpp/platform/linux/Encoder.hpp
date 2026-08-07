@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <type_traits>
 
 #include "EncodePipeline.h"
@@ -232,6 +233,9 @@ public:
 
         encoder
             = EncodePipeline::Create(vkCtx, devicePath, *frame, outExtent.width, outExtent.height);
+        if (!encoder) {
+            throw std::runtime_error("no usable encoder for the current settings");
+        }
         encoderMissingLogged = false;
 
         idrScheduler.OnStreamStart();

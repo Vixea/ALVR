@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <utility>
 
 using u8 = uint8_t;
@@ -35,6 +36,7 @@ public:
         if (hasValue_)
             value.~T();
 
+        hasValue_ = false;
         new (&value) T { std::forward<CTs>(cvals)... };
         hasValue_ = true;
     }
@@ -44,6 +46,7 @@ public:
             return value;
 
         assert(false);
+        abort();
     }
 
     bool hasValue() { return hasValue_; }
