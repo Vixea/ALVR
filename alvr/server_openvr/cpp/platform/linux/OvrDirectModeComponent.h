@@ -6,6 +6,7 @@
 #include "alvr_server/Settings.h"
 
 #include <map>
+#include <atomic>
 #include <mutex>
 
 #include <vulkan/vulkan.h>
@@ -19,6 +20,15 @@ public:
     );
 
     void RequestIdr() { enc.requestIdr(); }
+
+    // Called from the event loop thread when negotiated settings arrive.
+    // The state change itself is applied on the compositor thread inside
+    // Present, which then builds the encoder from the new settings.
+    void RequestEncoderReset() { m_encoderState = EncoderState::RebuildRequested; }
+
+    // Called from the event loop thread when the client disconnects. Present
+    // tears the encoder down and goes idle until the next connect.
+    void RequestEncoderShutdown() { m_encoderState = EncoderState::ShutdownRequested; }
 
     /** Specific to Oculus compositor support, textures supplied must be created using this method.
      */
@@ -75,9 +85,14 @@ private:
     // Track current texture index for each eye to avoid UB with uninitialized data
     std::map<ProcessResource*, uint32_t> m_swapchainIndices;
 
-    std::array<vr::SharedTextureHandle_t, 6> layer0Texts;
+    std::array<vr::SharedTextureHandle_t, 6> layer0Texts {};
 
     alvr::Encoder enc;
+
+    // Written by the event loop thread, applied and advanced by the
+    // compositor thread at the top of Present.
+    enum class EncoderState { Idle, RebuildRequested, Streaming, ShutdownRequested };
+    std::atomic<EncoderState> m_encoderState { EncoderState::Idle };
 
     std::mutex m_presentMutex;
 };

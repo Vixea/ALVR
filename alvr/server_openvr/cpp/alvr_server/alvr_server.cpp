@@ -229,6 +229,12 @@ void* CppOpenvrEntryPoint(const char* interface_name, int* return_code) {
 bool InitializeStreaming(Settings settings) {
     g_settings = settings;
 
+#ifdef __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestEncoderReset();
+    }
+#endif
+
     if (!g_driver_provider.devices_initialized) {
         if (!g_driver_provider.early_hmd_initialization) {
             auto hmd = new Hmd();
@@ -354,6 +360,12 @@ bool InitializeStreaming(Settings settings) {
 }
 
 void DeinitializeStreaming() {
+#ifdef __linux__
+    if (g_driver_provider.hmd && g_driver_provider.hmd->m_directModeComponent) {
+        g_driver_provider.hmd->m_directModeComponent->RequestEncoderShutdown();
+    }
+#endif
+
     if (g_driver_provider.hmd) {
         g_driver_provider.hmd->StopStreaming();
     }

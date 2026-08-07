@@ -207,6 +207,27 @@ void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2])
 void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     m_submitLayer = 0;
 
+    switch (m_encoderState.load()) {
+    case EncoderState::RebuildRequested:
+        Info("Rebuilding encoder from negotiated settings\n");
+        enc.shutdown();
+        layer0Texts.fill(0);
+        m_encoderState = EncoderState::Streaming;
+        break;
+    case EncoderState::ShutdownRequested:
+        enc.shutdown();
+        layer0Texts.fill(0);
+        m_encoderState = EncoderState::Idle;
+        return;
+    // Before a client connects there are no negotiated settings, so building
+    // an encoder here would use wrong defaults and fail noisily. Do nothing
+    // until streaming starts.
+    case EncoderState::Idle:
+        return;
+    case EncoderState::Streaming:
+        break;
+    }
+
     std::optional<u32> leftIdx;
     std::optional<u32> rightIdx;
 
@@ -282,6 +303,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             enc.initEncoding();
         } catch (std::exception const& e) {
             Error("Could not set up the encoder: %s\n", e.what());
+            enc.shutdown();
             layer0Texts.fill(0);
         }
 

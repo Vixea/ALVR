@@ -136,6 +136,8 @@ class Encoder {
     Optional<render::Renderer> renderer;
 
     std::unique_ptr<EncodePipeline> encoder;
+    std::unique_ptr<VkFrame> frame;
+    bool encoderMissingLogged = false;
     IDRScheduler idrScheduler;
 
 public:
@@ -218,31 +220,38 @@ public:
 
         // av_log_set_level(AV_LOG_DEBUG);
 
-        // TODO: Fix this memory leakage
-
-        // TODO: The EncodePipeline should store this on it's own
-        auto& avHwCtx = *new alvr::HWContext(vkCtx);
-
         auto out = renderer.get().getOutput();
 
         // TODO: Fix Nvidia
 
-        // auto framCtx = new alvr::VkFrameCtx(aCtx, *(vk::ImageCreateInfo*)&out.imageCI);
-
-        auto frame = new alvr::VkFrame(
+        frame = std::make_unique<VkFrame>(
             vkCtx, out.image.image, out.imageCI, out.size, out.image.memory, out.drm
         );
 
         encoder
             = EncodePipeline::Create(vkCtx, devicePath, *frame, outExtent.width, outExtent.height);
+        encoderMissingLogged = false;
 
         idrScheduler.OnStreamStart();
     }
 
+    // Tears down the encode pipeline so the next createImages + initEncoding
+    // rebuilds from current settings. The pipeline references the frame, so
+    // destroy it first. Only call this from the thread that runs present().
+    void shutdown() {
+        encoder.reset();
+        frame.reset();
+        encoderMissingLogged = false;
+    }
+
     void present(u32 leftIdx, u32 rightIdx, u64 targetTimestampNs) {
         if (!encoder) {
-            Error("Encoder not initialized, skipping frame, and erroring.\n");
-            return; // encoder init failed (e.g. VAAPI bad args), avoid crash
+            // Say it once instead of at frame rate.
+            if (!encoderMissingLogged) {
+                Error("Encoder not initialized, skipping frames until it is rebuilt.\n");
+                encoderMissingLogged = true;
+            }
+            return;
         }
         ReportPresent(targetTimestampNs, 0);
         renderer.get().render(vkCtx, leftIdx, rightIdx);
