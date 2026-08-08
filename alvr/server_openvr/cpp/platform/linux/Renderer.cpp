@@ -549,132 +549,133 @@ void Renderer::render(VkContext& vkCtx, u32 leftIdx, u32 rightIdx) {
     cmdBuf.resetQueryPool(timestampPool, 0, 2);
     cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, timestampPool, 0);
 
-    // TODO: This loop is really scuffed, improve it
-    Image* prev = nullptr;
-    for (usize i = 0; i < pipes.size() + 1; ++i) {
-        Image* out = nullptr;
-        vk::Extent2D targetExtent;
+    auto flushBarriers = [&](std::vector<vk::ImageMemoryBarrier>& barriers,
+                             vk::PipelineStageFlags srcStage,
+                             vk::PipelineStageFlags dstStage) {
+        if (!barriers.empty()) {
+            cmdBuf.pipelineBarrier(srcStage, dstStage, {}, {}, {}, barriers);
+            barriers.clear();
+        }
+    };
 
-        if (i == pipes.size()) {
-            out = &output.image;
-            targetExtent = outExtent;
-        } else {
-            out = &stagingImgs[i % StagingImgCount];
-            targetExtent = vk::Extent2D {
-                .width = eyeExtent.width * 2,
-                .height = eyeExtent.height,
-            };
+    auto transitionImage = [&](Image& image,
+                               vk::ImageLayout newLayout,
+                               vk::AccessFlags srcAccessMask,
+                               vk::AccessFlags dstAccessMask,
+                               std::vector<vk::ImageMemoryBarrier>& barriers) {
+        if (image.layout == newLayout) {
+            return;
         }
 
-        vk::ImageMemoryBarrier imgBarrier { .subresourceRange {
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
-            .levelCount = 1,
-            .layerCount = 1,
-        } };
-
-        std::vector<vk::ImageMemoryBarrier> barriers;
-
-        if (i == 0) {
-            prev = &inputImages[leftIdx];
-
-            for (int i = 0; i < 2; ++i) {
-                if (prev->layout != vk::ImageLayout::eGeneral) {
-                    imgBarrier.image = prev->image;
-                    imgBarrier.oldLayout = prev->layout;
-                    prev->layout = vk::ImageLayout::eGeneral;
-                    imgBarrier.newLayout = vk::ImageLayout::eGeneral;
-                    imgBarrier.srcAccessMask = vk::AccessFlagBits::eNone;
-                    imgBarrier.dstAccessMask = vk::AccessFlagBits::eTransferRead,
-                    barriers.push_back(imgBarrier);
-                    barriers.push_back(imgBarrier);
-                }
-                prev = &inputImages[rightIdx];
-            }
-        } else {
-            if (prev->layout != vk::ImageLayout::eShaderReadOnlyOptimal) {
-                imgBarrier.image = prev->image;
-                imgBarrier.oldLayout = prev->layout;
-                prev->layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-                imgBarrier.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
-                imgBarrier.srcAccessMask = vk::AccessFlagBits::eNone;
-                imgBarrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-                barriers.push_back(imgBarrier);
-            }
-        }
-
-        // if (out->layout != vk::ImageLayout::eGeneral) {
-        imgBarrier.image = out->image;
-        imgBarrier.oldLayout = vk::ImageLayout::eUndefined;
-        out->layout = vk::ImageLayout::eGeneral;
-        imgBarrier.newLayout = vk::ImageLayout::eGeneral;
-        imgBarrier.srcAccessMask = vk::AccessFlagBits::eNone;
-        imgBarrier.dstAccessMask
-            = i == 0 ? vk::AccessFlagBits::eTransferWrite : vk::AccessFlagBits::eShaderWrite;
-        barriers.push_back(imgBarrier);
-        // }
-
-        if (barriers.size()) {
-            cmdBuf.pipelineBarrier(
-                vk::PipelineStageFlagBits::eBottomOfPipe,
-                i == 0 ? vk::PipelineStageFlagBits::eTransfer
-                       : vk::PipelineStageFlagBits::eComputeShader,
-                {},
-                {},
-                {},
-                barriers
-            );
-        }
-
-        if (i == 0) {
-            vk::ImageSubresourceLayers subresLayout {
+        barriers.push_back(vk::ImageMemoryBarrier {
+            .srcAccessMask = srcAccessMask,
+            .dstAccessMask = dstAccessMask,
+            .oldLayout = image.layout,
+            .newLayout = newLayout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image.image,
+            .subresourceRange {
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
-                .mipLevel = 0,
+                .baseMipLevel = 0,
+                .levelCount = 1,
                 .baseArrayLayer = 0,
                 .layerCount = 1,
-            };
+            },
+        });
+        image.layout = newLayout;
+    };
 
-            vk::ImageCopy2KHR leftCopy {
-                .srcSubresource = subresLayout,
-                .srcOffset = {},
-                .dstSubresource = subresLayout,
-                .dstOffset = {},
-                .extent = {
-                    .width = eyeExtent.width,
-                    .height = eyeExtent.height,
-                    .depth = 1,
-                },
-            };
-            vk::CopyImageInfo2KHR leftCopyInfo {
-                .srcImage = inputImages[leftIdx].image,
-                .srcImageLayout = inputImages[leftIdx].layout,
-                .dstImage = out->image,
-                .dstImageLayout = out->layout,
-                .regionCount = 1,
-                .pRegions = &leftCopy,
-            };
-            cmdBuf.copyImage2KHR(leftCopyInfo, vkCtx.dispatch);
+    std::vector<vk::ImageMemoryBarrier> barriers;
+    Image* prev = nullptr;
 
-            auto rightCopy = leftCopy;
-            rightCopy.dstOffset = vk::Offset3D {
-                .x = static_cast<int32_t>(eyeExtent.width),
-                .y = 0,
-                .z = 0,
-            };
-            vk::CopyImageInfo2KHR rightCopyInfo {
-                .srcImage = inputImages[rightIdx].image,
-                .srcImageLayout = inputImages[rightIdx].layout,
-                .dstImage = out->image,
-                .dstImageLayout = out->layout,
-                .regionCount = 1,
-                .pRegions = &rightCopy,
-            };
-            cmdBuf.copyImage2KHR(rightCopyInfo, vkCtx.dispatch);
-        } else {
-            pipes[i - 1].render(vkCtx, cmdBuf, prev->view, out->view, targetExtent);
-        }
+    // Copy the left and right eye images into the first working image.
+    Image* stageOut = pipes.empty() ? &output.image : &stagingImgs[0];
+    transitionImage(inputImages[leftIdx], vk::ImageLayout::eGeneral, vk::AccessFlagBits::eNone,
+                    vk::AccessFlagBits::eTransferRead, barriers);
+    transitionImage(inputImages[rightIdx], vk::ImageLayout::eGeneral, vk::AccessFlagBits::eNone,
+                    vk::AccessFlagBits::eTransferRead, barriers);
+    transitionImage(*stageOut, vk::ImageLayout::eGeneral, vk::AccessFlagBits::eNone,
+                    vk::AccessFlagBits::eTransferWrite, barriers);
 
-        prev = out;
+    flushBarriers(barriers, vk::PipelineStageFlagBits::eBottomOfPipe, vk::PipelineStageFlagBits::eTransfer);
+
+    vk::ImageSubresourceLayers subresLayout {
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .mipLevel = 0,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+
+    vk::ImageCopy2KHR leftCopy {
+        .srcSubresource = subresLayout,
+        .srcOffset = {},
+        .dstSubresource = subresLayout,
+        .dstOffset = {},
+        .extent = {
+            .width = eyeExtent.width,
+            .height = eyeExtent.height,
+            .depth = 1,
+        },
+    };
+    vk::CopyImageInfo2KHR leftCopyInfo {
+        .srcImage = inputImages[leftIdx].image,
+        .srcImageLayout = inputImages[leftIdx].layout,
+        .dstImage = stageOut->image,
+        .dstImageLayout = stageOut->layout,
+        .regionCount = 1,
+        .pRegions = &leftCopy,
+    };
+    cmdBuf.copyImage2KHR(leftCopyInfo, vkCtx.dispatch);
+
+    auto rightCopy = leftCopy;
+    rightCopy.dstOffset = vk::Offset3D {
+        .x = static_cast<int32_t>(eyeExtent.width),
+        .y = 0,
+        .z = 0,
+    };
+    vk::CopyImageInfo2KHR rightCopyInfo {
+        .srcImage = inputImages[rightIdx].image,
+        .srcImageLayout = inputImages[rightIdx].layout,
+        .dstImage = stageOut->image,
+        .dstImageLayout = stageOut->layout,
+        .regionCount = 1,
+        .pRegions = &rightCopy,
+    };
+    cmdBuf.copyImage2KHR(rightCopyInfo, vkCtx.dispatch);
+
+    prev = stageOut;
+
+    for (usize pipeIdx = 0; pipeIdx < pipes.size(); ++pipeIdx) {
+        Image* nextOut = pipeIdx + 1 == pipes.size() ? &output.image : &stagingImgs[(pipeIdx + 1) % StagingImgCount];
+        vk::Extent2D targetExtent = pipeIdx + 1 == pipes.size() ? outExtent
+                                                               : vk::Extent2D {
+                                                                     .width = eyeExtent.width * 2,
+                                                                     .height = eyeExtent.height,
+                                                                 };
+
+        transitionImage(
+            *prev,
+            vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::AccessFlagBits::eTransferWrite | vk::AccessFlagBits::eShaderWrite,
+            vk::AccessFlagBits::eShaderRead,
+            barriers
+        );
+        transitionImage(
+            *nextOut,
+            vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits::eNone,
+            vk::AccessFlagBits::eShaderWrite,
+            barriers
+        );
+
+        flushBarriers(barriers, vk::PipelineStageFlagBits::eTransfer | vk::PipelineStageFlagBits::eComputeShader,
+                      vk::PipelineStageFlagBits::eComputeShader);
+
+        pipes[pipeIdx].render(vkCtx, cmdBuf, prev->view, nextOut->view, targetExtent);
+        prev = nextOut;
     }
+
 
     cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timestampPool, 1);
 

@@ -58,8 +58,8 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
             true,
             1,
             1,
-            0, //TODO: Is 0 correct for these flags?
-            usageFlags, //TODO: Find actual needed flags for this, possibly the ones needed?
+            0, // Change creation flags if changed in renderer. Otherwise, the image may not be usable in the renderer.
+            usageFlags, // Change usage flags if changed in renderer. Otherwise, the image may not be usable in the renderer.
             &myHandle
         );
 
