@@ -148,11 +148,13 @@ void OvrDirectModeComponent::SetViewParams(const FfiViewParams params[2]) {
 OvrDirectModeComponent::OvrDirectModeComponent(std::shared_ptr<PoseHistory> poseHistory)
     : m_poseHistory(poseHistory)
     , m_submitLayer(0) {
+    alvr::instrument::Init();
     m_encodeWorker = std::thread(&OvrDirectModeComponent::EncodeWorkerLoop, this);
     StartVsyncAnnouncer();
 }
 
 OvrDirectModeComponent::~OvrDirectModeComponent() {
+    alvr::instrument::Shutdown();
     // Stops before the encode worker: the announcer's grid is what
     // PostPresent holds against, and a hold outliving the worker leaves a
     // present waiting on a frame nothing will encode.
@@ -331,6 +333,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
     }
 }
 
+//DO use this function for instrumentation, make sure to try to see if changing things change the end result of what we get from the compositor, and if it does, then we can use that to get more information about what is going on in the compositor
 void OvrDirectModeComponent::CreateSwapTextureSet(
     uint32_t unPid,
     const SwapTextureSetDesc_t* pSwapTextureSetDesc,
@@ -348,6 +351,7 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
     ProcessResource* processResource = new ProcessResource();
     processResource->textDesc = *pSwapTextureSetDesc;
     processResource->pid = unPid;
+    processResource->createdAt = std::chrono::steady_clock::now();
     m_swapchainIndices[processResource] = 0;
 
     {
@@ -355,25 +359,51 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         Info("VrServer PID %d\n", pid);
     }
 
-    uint32_t usageFlags = static_cast<uint32_t>(
+    // --- Experiment overrides ---
+    uint32_t requestedFormat = pSwapTextureSetDesc->nFormat;
+    uint32_t effectiveFormat = requestedFormat;
+    alvr::instrument::OverrideFormat(&effectiveFormat);
+
+    uint32_t requestedUsageFlags = static_cast<uint32_t>(
         vk::ImageUsageFlagBits::eTransferSrc | 
         vk::ImageUsageFlagBits::eSampled | 
         vk::ImageUsageFlagBits::eInputAttachment
     );
+    uint32_t effectiveUsageFlags = requestedUsageFlags;
+    alvr::instrument::OverrideUsageFlags(&effectiveUsageFlags);
 
+    bool requestedRenderable = true;
+    bool effectiveRenderable = requestedRenderable;
+    alvr::instrument::OverrideRenderable(&effectiveRenderable);
+
+    bool requestedMappable = false;
+    bool effectiveMappable = requestedMappable;
+    alvr::instrument::OverrideMappable(&effectiveMappable);
+
+    bool requestedComputeAccess = true;
+    bool effectiveComputeAccess = requestedComputeAccess;
+    alvr::instrument::OverrideComputeAccess(&effectiveComputeAccess);
+
+    if (effectiveFormat != requestedFormat)
+        Info("Instrument: format override %u -> %u\n", requestedFormat, effectiveFormat);
+    if (effectiveUsageFlags != requestedUsageFlags)
+        Info("Instrument: usage flags override 0x%x -> 0x%x\n", requestedUsageFlags, effectiveUsageFlags);
+
+    bool allSuccess = true;
     for (int i = 0; i < 3; i++) {
+        ///virtual bool NewSharedVulkanImage( uint32_t nImageFormat, uint32_t nWidth, uint32_t nHeight, bool bRenderable, bool bMappable, bool bComputeAccess, uint32_t unMipLevels, uint32_t unArrayLayerCount, uint32_t unAdditionalVkCreateFlags, uint32_t unAdditionalVkUsageFlags, vr::SharedTextureHandle_t *pSharedHandle ) = 0;
         vr::SharedTextureHandle_t myHandle = 0;
         bool success = vr::VRIPCResourceManager()->NewSharedVulkanImage(
-            pSwapTextureSetDesc->nFormat,
+            effectiveFormat,
             pSwapTextureSetDesc->nWidth,
             pSwapTextureSetDesc->nHeight,
-            true,
-            false,
-            true,
+            effectiveRenderable,
+            effectiveMappable,
+            effectiveComputeAccess,
             1,
             1,
             0, // Change creation flags if changed in renderer. Otherwise, the image may not be usable in the renderer.
-            usageFlags, // Change usage flags if changed in renderer. Otherwise, the image may not be usable in the renderer.
+            effectiveUsageFlags, // Change usage flags if changed in renderer. Otherwise, the image may not be usable in the renderer.
             &myHandle
         );
 
@@ -383,6 +413,21 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         if (!success) {
             Error("VRCIPCResourceManager: Failed to create shared texture\n");
             CleanupProcessResource(processResource);
+            allSuccess = false;
+
+            // Log the failed creation
+            uint64_t handles[3] = {};
+            int fds[3] = { -1, -1, -1 };
+            alvr::instrument::LogCreateSwapTextureSet(
+                unPid, requestedFormat, effectiveFormat,
+                pSwapTextureSetDesc->nWidth, pSwapTextureSetDesc->nHeight,
+                pSwapTextureSetDesc->nSampleCount,
+                requestedUsageFlags, effectiveUsageFlags,
+                requestedRenderable, effectiveRenderable,
+                requestedMappable, effectiveMappable,
+                requestedComputeAccess, effectiveComputeAccess,
+                handles, fds, false
+            );
             return;
         }
 
@@ -392,6 +437,21 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
             Error("Failed to get fd for texture\n");
             vr::VRIPCResourceManager()->UnrefResource(myHandle);
             CleanupProcessResource(processResource);
+            allSuccess = false;
+
+            // Log the failed creation
+            uint64_t handles[3] = {};
+            int fds[3] = { -1, -1, -1 };
+            alvr::instrument::LogCreateSwapTextureSet(
+                unPid, requestedFormat, effectiveFormat,
+                pSwapTextureSetDesc->nWidth, pSwapTextureSetDesc->nHeight,
+                pSwapTextureSetDesc->nSampleCount,
+                requestedUsageFlags, effectiveUsageFlags,
+                requestedRenderable, effectiveRenderable,
+                requestedMappable, effectiveMappable,
+                requestedComputeAccess, effectiveComputeAccess,
+                handles, fds, false
+            );
             return;
         }
 
@@ -404,6 +464,23 @@ void OvrDirectModeComponent::CreateSwapTextureSet(
         pOutSwapTextureSet->rSharedTextureHandles[i] = myHandle;
         Info("Created Texture %d %p\n", i, processResource->sharedHandles[i]);
     }
+
+    // Log the successful creation
+    uint64_t logHandles[3] = {
+        (uint64_t)processResource->sharedHandles[0],
+        (uint64_t)processResource->sharedHandles[1],
+        (uint64_t)processResource->sharedHandles[2],
+    };
+    alvr::instrument::LogCreateSwapTextureSet(
+        unPid, requestedFormat, effectiveFormat,
+        pSwapTextureSetDesc->nWidth, pSwapTextureSetDesc->nHeight,
+        pSwapTextureSetDesc->nSampleCount,
+        requestedUsageFlags, effectiveUsageFlags,
+        requestedRenderable, effectiveRenderable,
+        requestedMappable, effectiveMappable,
+        requestedComputeAccess, effectiveComputeAccess,
+        logHandles, processResource->fds, true
+    );
 }
 
 /** Used to textures created using CreateSwapTextureSet.  Only one of the set's handles needs to be
@@ -415,6 +492,11 @@ void OvrDirectModeComponent::DestroySwapTextureSet(vr::SharedTextureHandle_t sha
     auto id = m_handleMap.find(sharedTextureHandle);
     if (id != m_handleMap.end()) {
         ProcessResource* p = id->second.first;
+        auto lifetime = std::chrono::steady_clock::now() - p->createdAt;
+        double lifetimeSec = std::chrono::duration<double>(lifetime).count();
+        alvr::instrument::LogDestroySwapTextureSet(
+            (uint64_t)sharedTextureHandle, p->pid, lifetimeSec
+        );
         CleanupProcessResource(p);
     } else {
         Debug("Requested to destroy not managing texture. handle:%p\n", sharedTextureHandle);
@@ -433,6 +515,7 @@ void OvrDirectModeComponent::DestroyAllSwapTextureSets(uint32_t unPid) {
             resourcesToDestroy.push_back(it->second.first);
         }
     }
+    alvr::instrument::LogDestroyAllSwapTextureSets(unPid, (uint32_t)resourcesToDestroy.size());
     for (auto* p : resourcesToDestroy) {
         CleanupProcessResource(p);
     }
@@ -456,6 +539,7 @@ void OvrDirectModeComponent::CleanupProcessResource(ProcessResource* processReso
 }
 
 /** After Present returns, calls this to get the next index to use for rendering. */
+//do use this function for instrumentation, it has alvr specific invariants, but also is used by the compositor to get the next index to use for rendering, and can't really do anything different, so it is safe to use for instrumentation
 void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
     vr::SharedTextureHandle_t sharedTextureHandles[2], uint32_t (*pIndices)[2]
 ) {
@@ -473,12 +557,22 @@ void OvrDirectModeComponent::GetNextSwapTextureSetIndex(
             (*pIndices)[eye] = idx;
         }
     }
+
+    if (pIndices) {
+        uint64_t logHandles[2] = {
+            (uint64_t)sharedTextureHandles[0],
+            (uint64_t)sharedTextureHandles[1],
+        };
+        alvr::instrument::LogGetNextSwapTextureSetIndex(logHandles, *pIndices);
+    }
+
     m_presentMutex.unlock();
 }
 
 /** Call once per layer to draw for this frame.  One shared texture handle per eye.  Textures must
  * be created using CreateSwapTextureSet and should be alternated per frame.  Call Present once all
  * layers have been submitted. */
+//DO not use this function for instrumentation, it is alvr specific invariants
 void OvrDirectModeComponent::SubmitLayer(const SubmitLayerPerEye_t (&perEye)[2]) {
     m_presentMutex.lock();
 
@@ -550,6 +644,22 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         break;
     }
 
+    // begin Instrument here
+
+    // Probe fence state across all 6 texture slots before anything else.
+    // Non-destructive: export on a separate fd, poll(0), close.
+    bool fencePending[6] = {};
+    for (int i = 0; i < 6; ++i) {
+        if (m_syncFds[i] >= 0) {
+            int probeFd = exportReadSyncFile(m_syncFds[i]);
+            if (probeFd >= 0) {
+                struct pollfd pfd = { .fd = probeFd, .events = POLLIN };
+                fencePending[i] = (poll(&pfd, 1, 0) == 0); // 0 = timeout = still pending
+                close(probeFd);
+            }
+        }
+    }
+
     std::optional<u32> leftIdx;
     std::optional<u32> rightIdx;
 
@@ -588,6 +698,8 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             fds[i + 3] = dup(rightIt->second.first->fds[i]);
         }
 
+        // above Explain why we need to dup things
+
         for (u32 i = 0; i < fds.size(); ++i) {
             if (fds[i] == -1) {
                 Error("Could not duplicate texture fd %u, skipping encoder setup\n", i);
@@ -600,6 +712,18 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             }
         }
 
+        // Log the first-present (encoder setup path)
+        alvr::instrument::LogPresent(
+            0, 0, m_targetTimestampNs,
+            (uint64_t)syncTexture,
+            m_syncFds, fencePending,
+            true  // isFirstPresent
+        );
+
+        // end Instrument here
+
+        //begin code is alvr specific invariants, DO NOT uses it for instrumentation
+
         // Keep a second dup of each texture fd for exporting write fences at
         // Present; Vulkan consumes the import dups below.
         for (u32 i = 0; i < fds.size(); ++i) {
@@ -608,6 +732,8 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
             }
             m_syncFds[i] = dup(fds[i]);
         }
+
+        //end code is alvr specific invariants, DO NOT uses it for instrumentation
 
         auto const& settings = Settings_Instance();
 
@@ -652,6 +778,15 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
 
     // TODO: Merge layers or something
 
+    // Log steady-state present with fence state from the probe above
+    alvr::instrument::LogPresent(
+        leftIdx.value(), rightIdx.value(),
+        m_targetTimestampNs,
+        (uint64_t)syncTexture,
+        m_syncFds, fencePending,
+        false  // not first present
+    );
+
     FrameJob job {};
     job.leftIdx = leftIdx.value();
     job.rightIdx = rightIdx.value();
@@ -694,6 +829,8 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
     m_jobCv.notify_one();
 }
 
+
+//DO not use this function for instrumentation, it is alvr specific invariants
 void OvrDirectModeComponent::PostPresent(const Throttling_t* pThrottling) {
     // Prop_Hmd_SupportsAppThrottling_Bool is set, so SteamVR sends throttle
     // hints here and predicts poses assuming we honor them. Ignoring them
@@ -717,6 +854,8 @@ void OvrDirectModeComponent::PostPresent(const Throttling_t* pThrottling) {
     PaceAfterPresent(throttleFrames);
 }
 
+
+//DO not use this function for instrumentation, it is alvr specific invariants
 void OvrDirectModeComponent::GetFrameTiming(vr::DriverDirectMode_FrameTiming* pFrameTiming) {
     if (pFrameTiming == nullptr
         || pFrameTiming->m_nSize < sizeof(vr::DriverDirectMode_FrameTiming)) {

@@ -16,6 +16,7 @@
 #include <vulkan/vulkan.h>
 
 #include "Encoder.hpp"
+#include "Instrument.h"
 
 class OvrDirectModeComponent : public vr::IVRDriverDirectModeComponent {
 public:
@@ -83,6 +84,7 @@ private:
         int fds[3];
         SwapTextureSetDesc_t textDesc;
         uint32_t pid;
+        std::chrono::steady_clock::time_point createdAt;
     };
     std::map<vr::SharedTextureHandle_t, std::pair<ProcessResource*, int>> m_handleMap;
     void CleanupProcessResource(ProcessResource* processResource);
