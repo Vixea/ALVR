@@ -430,8 +430,17 @@ impl StreamContext {
         // `timestamp` is generally a current vsync time, but may be repeated if frames are
         // dropped. Some runtimes dislike it if the timestamp is repeated for too long, so after
         // one second we begin presenting a lagged vsync time instead.
-        let mut openxr_display_time =
-            Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)));
+        // SteamVR's OpenXR runtime rejects displayTime values older than the current frame's
+        // predictedDisplayTime (vsync_time) with XR_ERROR_TIME_INVALID, while still reprojecting
+        // using the poses embedded in CompositionLayerProjectionView.
+        let mut openxr_display_time = if matches!(
+            self.core_context.platform(),
+            Platform::SteamFrame | Platform::LinuxPc
+        ) {
+            vsync_time
+        } else {
+            Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)))
+        };
 
         // (shinyquagsire23) I don't entirely trust runtimes to implement CompositionLayerProjectionView
         // correctly, but if we do trust them, avoid doing rotation ourselves. Otherwise, rerender.
