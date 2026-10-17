@@ -1,5 +1,7 @@
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "linux")]
+mod linux;
 
 use alvr_common::anyhow::Result;
 use alvr_session::{CodecType, MediacodecProperty};
@@ -18,17 +20,19 @@ pub struct VideoDecoderConfig {
 pub struct VideoDecoderSink {
     #[cfg(target_os = "android")]
     inner: android::VideoDecoderSink,
+    #[cfg(target_os = "linux")]
+    inner: linux::VideoDecoderSink,
 }
 
 impl VideoDecoderSink {
     // returns true if frame has been successfully enqueued
     #[allow(unused_variables)]
     pub fn push_nal(&mut self, timestamp: Duration, nal: &[u8]) -> bool {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         {
             alvr_common::show_err(self.inner.push_frame_nal(timestamp, nal)).unwrap_or(false)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
         false
     }
 }
@@ -36,16 +40,19 @@ impl VideoDecoderSink {
 pub struct VideoDecoderSource {
     #[cfg(target_os = "android")]
     inner: android::VideoDecoderSource,
+    #[cfg(target_os = "linux")]
+    inner: linux::VideoDecoderSource,
 }
 
 impl VideoDecoderSource {
-    /// If a frame is available, return the timestamp and the AHardwareBuffer.
+    /// If a frame is available, return the timestamp and the native frame handle
+    /// (`AHardwareBuffer` on Android, `LinuxVideoFrame` on Linux).
     pub fn get_frame(&mut self) -> Option<(Duration, *mut std::ffi::c_void)> {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "linux"))]
         {
             self.inner.dequeue_frame()
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
         None
     }
 }
@@ -70,6 +77,15 @@ pub fn create_decoder(
             VideoDecoderSource { inner: source },
         )
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "linux")]
+    {
+        let (sink, source) = linux::video_decoder_split(config, report_frame_decoded).unwrap();
+
+        (
+            VideoDecoderSink { inner: sink },
+            VideoDecoderSource { inner: source },
+        )
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     (VideoDecoderSink {}, VideoDecoderSource {})
 }

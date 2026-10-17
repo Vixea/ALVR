@@ -1,0 +1,12 @@
+[package]
+name = "alvr_client_linux"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+alvr_filesystem.workspace = true
+
+libloading = "0.8"
+

@@ -5,3 +5,9 @@ pub extern "C" fn alvr_entry_point(java_vm: *mut std::ffi::c_void, context: *mut
 
     crate::entry_point();
 }
+
+#[cfg(not(target_os = "android"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn alvr_entry_point() {
+    crate::entry_point();
+}

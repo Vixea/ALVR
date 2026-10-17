@@ -6,7 +6,7 @@ pub use lobby::*;
 pub use stream::*;
 
 use alvr_common::{
-    DeviceMotion, Fov, Pose,
+    DeviceMotion, Fov, Pose, error,
     glam::{Mat4, UVec2, Vec4},
 };
 use glow::{self as gl, HasContext};
@@ -32,6 +32,42 @@ type CreateImageFn = unsafe extern "C" fn(
 type DestroyImageFn = unsafe extern "C" fn(egl::EGLDisplay, egl::EGLImage) -> egl::Boolean;
 type GetNativeClientBufferFn = unsafe extern "C" fn(*const c_void) -> egl::EGLClientBuffer;
 type ImageTargetTexture2DFn = unsafe extern "C" fn(egl::Enum, egl::EGLImage);
+
+pub const DMA_BUF_MAX_PLANES: usize = 4;
+
+/// One plane of a Linux DMA-BUF image.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DmaBufPlane {
+    pub fd: i32,
+    pub offset: u32,
+    pub pitch: u32,
+    /// DRM format modifier. `None` means implicit/unknown modifier.
+    pub modifier: Option<u64>,
+}
+
+/// Description of a decoded video image exported as Linux DMA-BUF(s).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DmaBufImage {
+    /// DRM fourcc, e.g. `DRM_FORMAT_NV12`
+    pub fourcc: u32,
+    pub width: u32,
+    pub height: u32,
+    pub planes: [DmaBufPlane; DMA_BUF_MAX_PLANES],
+    pub plane_count: usize,
+}
+
+/// Decoded video frame passed (as an opaque pointer) from the Linux video decoder to the stream
+/// renderer. This takes the place of AHardwareBuffer on Android.
+pub enum LinuxVideoFrame {
+    /// Zero-copy hardware frame, imported with EGL_EXT_image_dma_buf_import
+    DmaBuf(DmaBufImage),
+    /// CPU fallback (software decoding or non DRM PRIME output), tightly packed RGBA8
+    Rgba {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    },
+}
 
 pub struct HandData {
     pub grip_motion: Option<DeviceMotion>,
@@ -83,8 +119,11 @@ fn projection_from_fov(fov: Fov) -> Mat4 {
 }
 
 pub fn choose_swapchain_format(supported_formats: &[u32], enable_hdr: bool) -> u32 {
+    alvr_common::info!("OpenXR supported swapchain formats: {supported_formats:#x?}");
+
     // Priority-sorted list of swapchain formats we'll accept--
-    let mut app_supported_swapchain_formats = vec![gl::SRGB8_ALPHA8, gl::RGBA8];
+    let mut app_supported_swapchain_formats =
+        vec![gl::SRGB8_ALPHA8, gl::RGBA8, gl::RGBA16F, gl::RGB10_A2];
 
     // float16 is required for HDR output. However, float16 swapchains
     // have a high perf cost, so only use these if HDR is enabled.
@@ -99,7 +138,7 @@ pub fn choose_swapchain_format(supported_formats: &[u32], enable_hdr: bool) -> u
     }
 
     // If we can't enumerate, default to a required format
-    gl::RGBA8
+    supported_formats.first().copied().unwrap_or(gl::RGBA8)
 }
 
 pub fn gl_format_to_wgpu(format: u32) -> TextureFormat {
@@ -107,7 +146,8 @@ pub fn gl_format_to_wgpu(format: u32) -> TextureFormat {
         gl::SRGB8_ALPHA8 => TextureFormat::Rgba8UnormSrgb,
         gl::RGBA8 => TextureFormat::Rgba8Unorm,
         gl::RGBA16F => TextureFormat::Rgba16Float,
-        _ => panic!("Unsupported GL format: {format}"),
+        gl::RGB10_A2 => TextureFormat::Rgb10a2Unorm,
+        _ => panic!("Unsupported GL format: {format:#x}"),
     }
 }
 
@@ -221,7 +261,7 @@ pub struct GraphicsContext {
 
     create_image: CreateImageFn,
     destroy_image: DestroyImageFn,
-    get_native_client_buffer: GetNativeClientBufferFn,
+    get_native_client_buffer: Option<GetNativeClientBufferFn>,
     image_target_texture_2d: ImageTargetTexture2DFn,
 }
 
@@ -313,7 +353,7 @@ impl GraphicsContext {
                 let create_image: CreateImageFn = mem::transmute(get_fn_ptr(CREATE_IMAGE_FN_STR));
                 let destroy_image: DestroyImageFn =
                     mem::transmute(get_fn_ptr(DESTROY_IMAGE_FN_STR));
-                let get_native_client_buffer: GetNativeClientBufferFn =
+                let get_native_client_buffer: Option<GetNativeClientBufferFn> =
                     mem::transmute(get_fn_ptr(GET_NATIVE_CLIENT_BUFFER_FN_STR));
                 let image_target_texture_2d: ImageTargetTexture2DFn =
                     mem::transmute(get_fn_ptr(IMAGE_TARGET_TEXTURE_2D_FN_STR));
@@ -387,7 +427,12 @@ impl GraphicsContext {
         const EGL_NATIVE_BUFFER_ANDROID: u32 = 0x3140;
 
         if !buffer.is_null() {
-            let client_buffer = unsafe { (self.get_native_client_buffer)(buffer) };
+            let Some(get_native_client_buffer) = self.get_native_client_buffer else {
+                error!("eglGetNativeClientBufferANDROID is not available");
+                return;
+            };
+
+            let client_buffer = unsafe { get_native_client_buffer(buffer) };
             check_error(&self.gl_context, "get_native_client_buffer");
 
             let image = unsafe {
@@ -415,6 +460,103 @@ impl GraphicsContext {
             unsafe { (self.destroy_image)(self.egl_display.as_ptr(), image) };
             check_error(&self.gl_context, "destroy_image");
         }
+    }
+
+    /// Imports a Linux DMA-BUF image as an EGLImage bound to `texture` (GL_TEXTURE_EXTERNAL_OES)
+    /// for the duration of `render_cb`.
+    ///
+    /// # Safety
+    /// The file descriptors in `image` must be valid for the duration of the call.
+    /// `texture` must be a valid GL texture.
+    pub unsafe fn render_dmabuf_using_texture(
+        &self,
+        image: &DmaBufImage,
+        texture: gl::Texture,
+        render_cb: impl FnOnce(),
+    ) {
+        const EGL_LINUX_DMA_BUF_EXT: u32 = 0x3270;
+        const EGL_LINUX_DRM_FOURCC_EXT: i32 = 0x3271;
+        const EGL_YUV_COLOR_SPACE_HINT_EXT: i32 = 0x327B;
+        const EGL_SAMPLE_RANGE_HINT_EXT: i32 = 0x327C;
+        const EGL_ITU_REC709_EXT: i32 = 0x3280;
+        const EGL_YUV_NARROW_RANGE_EXT: i32 = 0x3283;
+        // [fd, offset, pitch, modifier_lo, modifier_hi] for each plane
+        const PLANE_ATTRIBS: [[i32; 5]; DMA_BUF_MAX_PLANES] = [
+            [0x3272, 0x3273, 0x3274, 0x3443, 0x3444],
+            [0x3275, 0x3276, 0x3277, 0x3445, 0x3446],
+            [0x3278, 0x3279, 0x327A, 0x3447, 0x3448],
+            [0x3440, 0x3441, 0x3442, 0x3449, 0x344A],
+        ];
+
+        if image.plane_count == 0 || image.plane_count > DMA_BUF_MAX_PLANES {
+            error!("Invalid DMA-BUF plane count: {}", image.plane_count);
+            return;
+        }
+
+        let mut attribs = vec![
+            egl::WIDTH,
+            image.width as i32,
+            egl::HEIGHT,
+            image.height as i32,
+            EGL_LINUX_DRM_FOURCC_EXT,
+            image.fourcc as i32,
+            EGL_YUV_COLOR_SPACE_HINT_EXT,
+            EGL_ITU_REC709_EXT,
+            EGL_SAMPLE_RANGE_HINT_EXT,
+            EGL_YUV_NARROW_RANGE_EXT,
+        ];
+        for (plane, [fd_attr, offset_attr, pitch_attr, mod_lo_attr, mod_hi_attr]) in
+            image.planes[..image.plane_count].iter().zip(PLANE_ATTRIBS)
+        {
+            attribs.extend([
+                fd_attr,
+                plane.fd,
+                offset_attr,
+                plane.offset as i32,
+                pitch_attr,
+                plane.pitch as i32,
+            ]);
+            if let Some(modifier) = plane.modifier {
+                attribs.extend([
+                    mod_lo_attr,
+                    (modifier & 0xFFFF_FFFF) as u32 as i32,
+                    mod_hi_attr,
+                    (modifier >> 32) as u32 as i32,
+                ]);
+            }
+        }
+        attribs.push(egl::NONE);
+
+        let egl_image = unsafe {
+            (self.create_image)(
+                self.egl_display.as_ptr(),
+                egl::NO_CONTEXT,
+                EGL_LINUX_DMA_BUF_EXT,
+                ptr::null_mut(),
+                attribs.as_ptr(),
+            )
+        };
+        if egl_image.is_null() {
+            error!(
+                "Failed to import DMA-BUF image (fourcc: {:#x}, {}x{}, planes: {})",
+                image.fourcc, image.width, image.height, image.plane_count
+            );
+            return;
+        }
+
+        unsafe {
+            self.gl_context
+                .bind_texture(GL_TEXTURE_EXTERNAL_OES, Some(texture))
+        };
+        check_error(&self.gl_context, "bind texture OES");
+
+        unsafe { (self.image_target_texture_2d)(GL_TEXTURE_EXTERNAL_OES, egl_image) };
+        check_error(&self.gl_context, "image_target_texture_2d");
+
+        render_cb();
+
+        unsafe { (self.destroy_image)(self.egl_display.as_ptr(), egl_image) };
+        check_error(&self.gl_context, "destroy_image");
     }
 }
 

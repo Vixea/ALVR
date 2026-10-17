@@ -158,8 +158,9 @@ fn connection_pipeline(
     *connection_state_lock = ConnectionState::Connecting;
 
     // TODO: Don't fetch cpal sample rate, get directly from AAudio
-    let microphone_sample_rate =
-        alvr_audio::input_sample_rate(&alvr_audio::new_input(None).to_con()?).to_con()?;
+    let microphone_sample_rate = alvr_audio::new_input(None)
+        .and_then(|dev| alvr_audio::input_sample_rate(&dev))
+        .unwrap_or(48_000);
 
     dbg_connection!("connection_pipeline: Send stream capabilities");
     proto_control_socket

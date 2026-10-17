@@ -34,3 +34,11 @@ ndk-context = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 env_logger = "0.11"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ffmpeg-next = { version = "9", default-features = false, features = [
+    "codec",
+    "format",
+    "software-scaling",
+] }
+

@@ -36,6 +36,7 @@ pub enum Platform {
     PlayForDreamMR,
     SamsungGalaxyXR,
     AndroidUnknown,
+    SteamFrame,
     VisionOSHeadset,
     WindowsPc,
     LinuxPc,
@@ -105,6 +106,7 @@ impl Display for Platform {
             Self::PlayForDreamMR => "Play For Dream MR",
             Self::SamsungGalaxyXR => "Samsung Galaxy XR",
             Self::AndroidUnknown => "Android (unknown)",
+            Self::SteamFrame => "Steam Frame",
             Self::VisionOSHeadset => "visionOS Headset",
             Self::WindowsPc => "Windows PC",
             Self::LinuxPc => "Linux PC",
@@ -115,7 +117,10 @@ impl Display for Platform {
     }
 }
 
-#[cfg_attr(not(target_os = "android"), expect(unused_variables))]
+#[cfg_attr(
+    not(any(target_os = "android", target_os = "linux")),
+    expect(unused_variables)
+)]
 pub fn platform(runtime_name: Option<String>, runtime_version: Option<u64>) -> Platform {
     #[cfg(target_os = "android")]
     {
@@ -161,15 +166,66 @@ pub fn platform(runtime_name: Option<String>, runtime_version: Option<u64>) -> P
             _ => Platform::AndroidUnknown,
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux_platform(runtime_name, runtime_version)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     {
         match std::env::consts::OS {
             "visionos" => Platform::VisionOSHeadset,
             "windows" => Platform::WindowsPc,
-            "linux" => Platform::LinuxPc,
             "macos" => Platform::Macos,
             _ => Platform::Unknown,
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_platform(runtime_name: Option<String>, runtime_version: Option<u64>) -> Platform {
+    // Note: these identifiers have not all been confirmed on retail hardware. "deckard" is the
+    // Steam Frame codename.
+    const STEAM_FRAME_IDS: &[&str] = &["steam frame", "steamframe", "deckard", "sm8650"];
+
+    let read = |path: &str| {
+        std::fs::read(path)
+            .map(|bytes| {
+                String::from_utf8_lossy(&bytes)
+                    .replace('\0', " ")
+                    .trim()
+                    .to_lowercase()
+            })
+            .unwrap_or_default()
+    };
+
+    let dt_model = read("/sys/firmware/devicetree/base/model");
+    let dt_compatible = read("/sys/firmware/devicetree/base/compatible");
+    let dmi_product = read("/sys/devices/virtual/dmi/id/product_name");
+    let dmi_board = read("/sys/devices/virtual/dmi/id/board_name");
+    let runtime = runtime_name.clone().unwrap_or_default().to_lowercase();
+
+    alvr_common::info!(
+        "devicetree model: {dt_model:?}, compatible: {dt_compatible:?}, \
+        dmi product: {dmi_product:?}, board: {dmi_board:?}, \
+        runtime_name: {runtime_name:?}, runtime_version: {runtime_version:?}",
+    );
+
+    let is_steam_frame = [
+        &dt_model,
+        &dt_compatible,
+        &dmi_product,
+        &dmi_board,
+        &runtime,
+    ]
+    .iter()
+    .any(|s| STEAM_FRAME_IDS.iter().any(|id| s.contains(id)));
+
+    // There are currently no other supported standalone Linux ARM headsets, so treat any
+    // aarch64 Linux device as a Steam Frame.
+    if is_steam_frame || cfg!(target_arch = "aarch64") {
+        Platform::SteamFrame
+    } else {
+        Platform::LinuxPc
     }
 }
 

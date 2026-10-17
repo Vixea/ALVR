@@ -108,7 +108,7 @@ pub fn init_logging() {
     #[cfg(not(target_os = "android"))]
     {
         use std::io::Write;
-        env_logger::builder()
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
             .format(|f, record| {
                 if send_log(record) {
                     writeln!(f, "{}", record.args())

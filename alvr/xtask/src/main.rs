@@ -57,6 +57,7 @@ FLAGS:
     --all-targets       For prepare-deps and build-client-lib subcommand, will build for all android supported ABI targets
     --meta-store        For package-client subcommand, build for Meta Store
     --pico-store        For package-client subcommand, build for Pico Store
+    --aarch64           Build Linux client for aarch64-unknown-linux-gnu (alias: --aarch)
 
 ARGS:
     --platform <NAME>   Can be one of: windows, linux, macos, android. Can be omitted
@@ -184,6 +185,7 @@ fn main() {
         let keep_config = args.contains("--keep-config");
         let link_stdcpp = !args.contains("--no-stdcpp");
         let all_targets = args.contains("--all-targets");
+        let aarch64 = args.contains("--aarch") || args.contains("--aarch64");
 
         let platform: Option<String> = args.opt_value_from_str("--platform").unwrap();
         let platform = platform.as_deref().map(|platform| match platform {
@@ -233,7 +235,13 @@ fn main() {
                 }
                 "build-launcher" => build::build_launcher(profile, false),
                 "build-server-lib" => build::build_server_lib(profile, None, false),
-                "build-client" => build::build_android_client(profile),
+                "build-client" => {
+                    if matches!(platform, Some(BuildPlatform::Linux)) || aarch64 {
+                        build::build_linux_client(profile, aarch64);
+                    } else {
+                        build::build_android_client(profile);
+                    }
+                }
                 "build-client-lib" => {
                     build::build_android_client_core_lib(profile, link_stdcpp, all_targets)
                 }

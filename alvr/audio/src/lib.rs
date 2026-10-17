@@ -285,18 +285,26 @@ pub fn record_audio_blocking(
             let state = Arc::clone(&state);
             let is_running = Arc::clone(&is_running);
             move |data, _| {
-                let data = if config.sample_format() == SampleFormat::F32 {
-                    data.bytes()
+                let data = match config.sample_format() {
+                    SampleFormat::F32 => data
+                        .bytes()
                         .chunks_exact(4)
                         .flat_map(|b| {
                             f32::from_ne_bytes([b[0], b[1], b[2], b[3]])
                                 .to_sample::<i16>()
                                 .to_ne_bytes()
-                                .to_vec()
                         })
-                        .collect()
-                } else {
-                    data.bytes().to_vec()
+                        .collect(),
+                    SampleFormat::U16 => data
+                        .bytes()
+                        .chunks_exact(2)
+                        .flat_map(|b| {
+                            u16::from_ne_bytes([b[0], b[1]])
+                                .to_sample::<i16>()
+                                .to_ne_bytes()
+                        })
+                        .collect(),
+                    _ => data.bytes().to_vec(),
                 };
 
                 let data = downmix_audio(data, config.channels(), channels_count);

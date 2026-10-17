@@ -5,16 +5,63 @@ use openxr as xr;
 use std::ptr;
 
 #[allow(unused)]
-pub fn session_create_info(ctx: &GraphicsContext) -> xr::opengles::SessionCreateInfo {
+pub fn create_session(
+    xr_instance: &xr::Instance,
+    xr_system: xr::SystemId,
+    ctx: &GraphicsContext,
+) -> (
+    xr::Session<xr::OpenGlEs>,
+    xr::FrameWaiter,
+    xr::FrameStream<xr::OpenGlEs>,
+) {
     #[cfg(target_os = "android")]
-    {
-        xr::opengles::SessionCreateInfo::Android {
+    unsafe {
+        xr_instance
+            .create_session(
+                xr_system,
+                &xr::opengles::SessionCreateInfo::Android {
+                    display: ctx.egl_display.as_ptr(),
+                    config: ctx.egl_config.as_ptr(),
+                    context: ctx.egl_context.as_ptr(),
+                },
+            )
+            .unwrap()
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use xr::sys::Handle;
+
+        let egl_lib = libloading::Library::new("libEGL.so.1")
+            .or_else(|_| libloading::Library::new("libEGL.so"))
+            .unwrap();
+        let get_proc_address: xr::sys::pfn::EglGetProcAddressMNDX =
+            *egl_lib.get(b"eglGetProcAddress\0").unwrap();
+
+        let binding = xr::sys::GraphicsBindingEGLMNDX {
+            ty: xr::sys::GraphicsBindingEGLMNDX::TYPE,
+            next: ptr::null(),
+            get_proc_address: Some(get_proc_address),
             display: ctx.egl_display.as_ptr(),
             config: ctx.egl_config.as_ptr(),
             context: ctx.egl_context.as_ptr(),
-        }
+        };
+        let info = xr::sys::SessionCreateInfo {
+            ty: xr::sys::SessionCreateInfo::TYPE,
+            next: ptr::from_ref(&binding).cast(),
+            create_flags: Default::default(),
+            system_id: xr_system,
+        };
+        let mut session = xr::sys::Session::NULL;
+        let res = (xr_instance.fp().create_session)(xr_instance.as_raw(), &info, &mut session);
+        assert_eq!(
+            res,
+            xr::sys::Result::SUCCESS,
+            "xrCreateSession failed: {res:?}"
+        );
+
+        xr::Session::from_raw(xr_instance.clone(), session, Box::new(egl_lib))
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
     unimplemented!()
 }
 

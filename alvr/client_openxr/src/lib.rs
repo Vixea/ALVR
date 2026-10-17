@@ -139,7 +139,6 @@ fn default_view() -> xr::View {
     }
 }
 
-// This exists to circumvent dead-code analysis
 fn create_session(
     xr_instance: &xr::Instance,
     xr_system: xr::SystemId,
@@ -149,12 +148,7 @@ fn create_session(
     xr::FrameWaiter,
     xr::FrameStream<xr::OpenGlEs>,
 ) {
-    #[allow(unreachable_code)]
-    unsafe {
-        xr_instance
-            .create_session(xr_system, &graphics::session_create_info(graphics_context))
-            .unwrap()
-    }
+    graphics::create_session(xr_instance, xr_system, graphics_context)
 }
 
 pub fn entry_point() {
@@ -176,7 +170,17 @@ pub fn entry_point() {
         _ => ("", CURRENT_OPENXR_VERSION),
     };
     let xr_entry = unsafe {
-        xr::Entry::load_from(Path::new(&format!("libopenxr_loader{loader_suffix}.so"))).unwrap()
+        xr::Entry::load_from(Path::new(&format!("libopenxr_loader{loader_suffix}.so")))
+            .or_else(|_| xr::Entry::load())
+            .unwrap_or_else(|e| {
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = e;
+                    xr::Entry::linked()
+                }
+                #[cfg(not(target_os = "linux"))]
+                panic!("{e}")
+            })
     };
 
     #[cfg(target_os = "android")]
@@ -221,6 +225,10 @@ pub fn entry_point() {
     {
         selected_exts.khr_android_create_instance = true;
     }
+    #[cfg(target_os = "linux")]
+    {
+        selected_exts.mndx_egl_enable = true;
+    }
     selected_exts.khr_convert_timespec_time = true;
     selected_exts.khr_opengl_es_enable = true;
     selected_exts.meta_body_tracking_full_body = true;
@@ -252,18 +260,22 @@ pub fn entry_point() {
         })
         .collect::<Vec<_>>();
 
-    let xr_instance = xr_entry
-        .create_instance(
+    let create_instance = |api_version| {
+        xr_entry.create_instance(
             &xr::ApplicationInfo {
                 application_name: "ALVR Client",
                 application_version: 0,
                 engine_name: "ALVR",
                 engine_version: 0,
-                api_version: openxr_version,
+                api_version,
             },
             &selected_exts,
             &[],
         )
+    };
+    let xr_instance = create_instance(openxr_version)
+        .or_else(|_| create_instance(LEGACY_OPENXR_VERSION))
+        .or_else(|_| create_instance(xr::Version::new(1, 0, 0)))
         .unwrap();
 
     let platform = alvr_system_info::platform(
@@ -312,8 +324,13 @@ pub fn entry_point() {
             views_config[0].max_image_rect_height,
         );
 
-        let refresh_rates = if selected_exts.fb_display_refresh_rate {
-            xr_session.enumerate_display_refresh_rates().unwrap()
+        let refresh_rates = if selected_exts.fb_display_refresh_rate
+            && let Ok(rates) = xr_session.enumerate_display_refresh_rates()
+            && !rates.is_empty()
+        {
+            rates
+        } else if platform == Platform::SteamFrame {
+            vec![72.0, 90.0, 120.0, 144.0]
         } else {
             vec![90.0]
         };

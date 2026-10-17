@@ -384,3 +384,51 @@ pub fn build_android_client(profile: Profile) {
     )
     .unwrap();
 }
+
+pub fn build_linux_client(profile: Profile, aarch64: bool) {
+    let sh = Shell::new().unwrap();
+
+    let mut flags = vec![];
+    match profile {
+        Profile::Distribution => {
+            flags.push("--profile");
+            flags.push("distribution");
+        }
+        Profile::Release => flags.push("--release"),
+        Profile::Debug => (),
+    }
+
+    let artifacts_dir = if aarch64 {
+        const TARGET: &str = "aarch64-unknown-linux-gnu";
+
+        flags.push("--target");
+        flags.push(TARGET);
+
+        afs::target_dir().join(TARGET).join(profile.to_string())
+    } else {
+        afs::target_dir().join(profile.to_string())
+    };
+    let flags_ref = &flags;
+
+    let build_dir = afs::build_dir().join("alvr_client_linux");
+    sh.create_dir(&build_dir).unwrap();
+
+    cmd!(
+        sh,
+        "cargo build -p alvr_client_openxr -p alvr_client_linux {flags_ref...}"
+    )
+    .run()
+    .unwrap();
+
+    sh.copy_file(
+        artifacts_dir.join(afs::dynlib_fname("alvr_client_openxr")),
+        build_dir.join(afs::dynlib_fname("alvr_client_openxr")),
+    )
+    .unwrap();
+
+    sh.copy_file(
+        artifacts_dir.join(afs::exec_fname("alvr_client_linux")),
+        build_dir.join(afs::exec_fname("alvr_client_linux")),
+    )
+    .unwrap();
+}
