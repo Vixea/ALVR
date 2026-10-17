@@ -13,6 +13,7 @@ use alvr_common::{
     glam::{Quat, UVec2, Vec3},
     info,
     parking_lot::RwLock,
+    warn,
 };
 use alvr_graphics::GraphicsContext;
 use alvr_session::{BodyTrackingBDConfig, BodyTrackingSourcesConfig, PerformanceLevel};
@@ -25,7 +26,17 @@ use interaction::{InteractionContext, InteractionSourcesConfig};
 use lobby::Lobby;
 use openxr as xr;
 use passthrough::PassthroughLayer;
-use std::{ffi::CStr, path::Path, rc::Rc, sync::Arc, thread, time::Duration};
+use std::{
+    ffi::CStr,
+    path::Path,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 use stream::StreamContext;
 
 fn from_xr_vec3(v: xr::Vector3f) -> Vec3 {
@@ -603,6 +614,8 @@ pub fn entry_point() {
                     panic!();
                 }
             };
+            update_xr_time_offset(&xr_instance, &frame_state);
+
             let frame_interval =
                 Duration::from_nanos(frame_state.predicted_display_period.as_nanos() as _);
             let vsync_time =
@@ -647,14 +660,14 @@ pub fn entry_point() {
                 let time = to_xr_time(display_time);
                 error!("End frame failed! {e}, timestamp: {display_time:?}, time: {time:?}");
 
-                if !platform.is_vive() {
-                    xr_frame_stream
-                        .end(
-                            frame_state.predicted_display_time,
-                            xr::EnvironmentBlendMode::OPAQUE,
-                            &[],
-                        )
-                        .unwrap();
+                if !platform.is_vive()
+                    && let Err(e) = xr_frame_stream.end(
+                        frame_state.predicted_display_time,
+                        xr::EnvironmentBlendMode::OPAQUE,
+                        &[],
+                    )
+                {
+                    error!("Fallback end frame failed! {e}");
                 }
             }
         }
@@ -665,10 +678,59 @@ pub fn entry_point() {
 
 #[allow(unused)]
 fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<xr::Time> {
-    xr_instance
-        .now()
-        .ok()
-        .filter(|&time_nanos| time_nanos.as_nanos() > 0)
+    if xr_instance.exts().khr_convert_timespec_time.is_some() {
+        xr_instance
+            .now()
+            .ok()
+            .filter(|&time_nanos| time_nanos.as_nanos() > 0)
+    } else {
+        let offset = XR_TIME_OFFSET_NS.load(Ordering::Relaxed);
+        if offset == i64::MIN {
+            return None;
+        }
+        monotonic_now()
+            .map(|now| xr::Time::from_nanos(now.as_nanos() + offset))
+            .filter(|&time_nanos| time_nanos.as_nanos() > 0)
+    }
+}
+
+static XR_TIME_OFFSET_NS: AtomicI64 = AtomicI64::new(i64::MIN);
+
+fn update_xr_time_offset(xr_instance: &xr::Instance, frame_state: &xr::FrameState) {
+    if xr_instance.exts().khr_convert_timespec_time.is_some() {
+        return;
+    }
+
+    if let Some(now) = monotonic_now() {
+        let xr_now = frame_state.predicted_display_time.as_nanos()
+            - frame_state.predicted_display_period.as_nanos();
+        XR_TIME_OFFSET_NS.store(xr_now - now.as_nanos(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn monotonic_now() -> Option<xr::Time> {
+    #[repr(C)]
+    struct timespec {
+        tv_sec: std::os::raw::c_long,
+        tv_nsec: std::os::raw::c_long,
+    }
+    const CLOCK_MONOTONIC: std::ffi::c_int = 1;
+    unsafe extern "C" {
+        fn clock_gettime(clk_id: std::ffi::c_int, tp: *mut timespec) -> std::ffi::c_int;
+    }
+
+    let mut ts = timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let res = unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) };
+    (res == 0).then(|| xr::Time::from_nanos(ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+fn monotonic_now() -> Option<xr::Time> {
+    None
 }
 
 #[cfg(target_os = "android")]
