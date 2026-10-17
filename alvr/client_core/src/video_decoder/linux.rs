@@ -171,7 +171,7 @@ impl Drop for VideoDecoderSource {
 }
 
 unsafe extern "C" fn get_format(
-    _ctx: *mut ffi::AVCodecContext,
+    ctx: *mut ffi::AVCodecContext,
     formats: *const ffi::AVPixelFormat,
 ) -> ffi::AVPixelFormat {
     let mut available = vec![];
@@ -183,20 +183,64 @@ unsafe extern "C" fn get_format(
         }
     }
 
-    // Prefer zero-copy DRM PRIME, then the first (native) software format
+    // Prefer zero-copy DRM PRIME when offered by v4l2m2m
     if available.contains(&ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME) {
-        ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME
-    } else {
-        available
-            .first()
-            .copied()
-            .unwrap_or(ffi::AVPixelFormat::AV_PIX_FMT_NONE)
+        return ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME;
+    }
+
+    // Otherwise pick a native software pixel format and avoid probing unconfigured hwaccels
+    // (vaapi, vdpau, cuda, vulkan)
+    for preferred in [
+        ffi::AVPixelFormat::AV_PIX_FMT_NV12,
+        ffi::AVPixelFormat::AV_PIX_FMT_YUV420P,
+        ffi::AVPixelFormat::AV_PIX_FMT_P010LE,
+        ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE,
+    ] {
+        if available.contains(&preferred) {
+            return preferred;
+        }
+    }
+
+    unsafe { ffi::avcodec_default_get_format(ctx, formats) }
+}
+
+fn create_drm_hwdevice_ctx() -> *mut ffi::AVBufferRef {
+    unsafe {
+        let mut hw_device_ctx: *mut ffi::AVBufferRef = ptr::null_mut();
+        for path in [
+            c"/dev/dri/renderD128".as_ptr(),
+            c"/dev/dri/card0".as_ptr(),
+            c"/dev/dri/card1".as_ptr(),
+            ptr::null(),
+        ] {
+            if ffi::av_hwdevice_ctx_create(
+                &mut hw_device_ctx,
+                ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
+                path,
+                ptr::null_mut(),
+                0,
+            ) >= 0
+                && !hw_device_ctx.is_null()
+            {
+                return hw_device_ctx;
+            }
+        }
+
+        // Fallback: v4l2_m2m only checks that hw_device_ctx->type == AV_HWDEVICE_TYPE_DRM to set
+        // output_drm = 1 and export V4L2 capture buffers via VIDIOC_EXPBUF as AV_PIX_FMT_DRM_PRIME.
+        hw_device_ctx = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM);
+        if !hw_device_ctx.is_null() && ffi::av_hwdevice_ctx_init(hw_device_ctx) < 0 {
+            ffi::av_buffer_unref(&mut hw_device_ctx);
+        }
+        hw_device_ctx
     }
 }
 
 fn open_decoder(
     codec: ffmpeg::Codec,
     config_nal: &[u8],
+    dimensions: Option<(c_int, c_int, c_int, c_int)>,
+    is_hw: bool,
 ) -> Result<ffmpeg::decoder::Video, ffmpeg::Error> {
     let mut context = codec::Context::new_with_codec(codec);
     context.set_flags(codec::Flags::LOW_DELAY);
@@ -205,9 +249,26 @@ fn open_decoder(
     unsafe {
         let ctx = context.as_mut_ptr();
 
+        if let Some((width, height, coded_width, coded_height)) = dimensions {
+            (*ctx).width = width;
+            (*ctx).height = height;
+            (*ctx).coded_width = coded_width;
+            (*ctx).coded_height = coded_height;
+        }
+
         (*ctx).pkt_timebase = PTS_TIME_BASE;
         (*ctx).get_format = Some(get_format);
         (*ctx).flags2 |= ffi::AV_CODEC_FLAG2_FAST as c_int;
+
+        if is_hw {
+            let hw_device_ctx = create_drm_hwdevice_ctx();
+            if !hw_device_ctx.is_null() {
+                (*ctx).hw_device_ctx = hw_device_ctx;
+            }
+        } else {
+            (*ctx).thread_count = 4;
+            (*ctx).thread_type = ffi::FF_THREAD_SLICE as c_int;
+        }
 
         if !config_nal.is_empty() {
             let padding = ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
@@ -223,19 +284,80 @@ fn open_decoder(
     context.decoder().video()
 }
 
-fn create_decoder(config: &VideoDecoderConfig) -> Result<ffmpeg::decoder::Video> {
+// V4L2 M2M decoders require non-zero coded_width/coded_height on AVCodecContext before
+// avcodec_open2 so VIDIOC_S_FMT and VIDIOC_REQBUFS on the output queue succeed (e.g. on Qualcomm
+// iris_driver). Probe the SPS/VPS/PPS in config_nal using the software decoder first.
+fn probe_dimensions(sw_id: codec::Id, config_nal: &[u8]) -> (c_int, c_int, c_int, c_int) {
+    if let Some(codec) = ffmpeg::decoder::find(sw_id)
+        && let Ok(mut decoder) = open_decoder(codec, config_nal, None, false)
+    {
+        if (decoder.width() == 0 || decoder.height() == 0) && !config_nal.is_empty() {
+            let packet = Packet::copy(config_nal);
+            let _ = decoder.send_packet(&packet);
+        }
+
+        let (width, height, coded_width, coded_height) = unsafe {
+            let ctx = decoder.as_ptr();
+            (
+                (*ctx).width,
+                (*ctx).height,
+                (*ctx).coded_width,
+                (*ctx).coded_height,
+            )
+        };
+
+        if width > 0 && height > 0 {
+            let cw = if coded_width > 0 { coded_width } else { width };
+            let ch = if coded_height > 0 {
+                coded_height
+            } else {
+                height
+            };
+            info!("Probed video dimensions from config NAL: {width}x{height} (coded: {cw}x{ch})");
+            return (width, height, cw, ch);
+        }
+    }
+
+    warn!("Could not probe dimensions from config NAL, defaulting to 1920x1080");
+    (1920, 1080, 1920, 1080)
+}
+
+fn open_software_decoder(
+    config: &VideoDecoderConfig,
+    dimensions: (c_int, c_int, c_int, c_int),
+) -> Result<ffmpeg::decoder::Video> {
+    let sw_id = match config.codec {
+        CodecType::H264 => codec::Id::H264,
+        CodecType::Hevc => codec::Id::HEVC,
+        CodecType::AV1 => bail!("AV1 decoding is not supported on Linux yet"),
+    };
+
+    let codec = ffmpeg::decoder::find(sw_id)
+        .ok_or_else(|| anyhow!("Software decoder for {sw_id:?} not available"))?;
+    let decoder = open_decoder(codec, &config.config_buffer, Some(dimensions), false)?;
+    info!("Using software decoder {}", codec.name());
+
+    Ok(decoder)
+}
+
+fn create_decoder(
+    config: &VideoDecoderConfig,
+) -> Result<(ffmpeg::decoder::Video, (c_int, c_int, c_int, c_int), bool)> {
     let (hw_name, sw_id) = match config.codec {
         CodecType::H264 => ("h264_v4l2m2m", codec::Id::H264),
         CodecType::Hevc => ("hevc_v4l2m2m", codec::Id::HEVC),
         CodecType::AV1 => bail!("AV1 decoding is not supported on Linux yet"),
     };
 
+    let dimensions = probe_dimensions(sw_id, &config.config_buffer);
+
     if !config.force_software_decoder {
         match ffmpeg::decoder::find_by_name(hw_name) {
-            Some(codec) => match open_decoder(codec, &config.config_buffer) {
+            Some(codec) => match open_decoder(codec, &config.config_buffer, Some(dimensions), true)
+            {
                 Ok(decoder) => {
                     info!("Using hardware decoder {hw_name}");
-                    return Ok(decoder);
+                    return Ok((decoder, dimensions, true));
                 }
                 // would be "warn!" but this is a severe caveat and a pretty major error.
                 Err(e) => error!("Attempting software fallback due to error in {hw_name}: {e}"),
@@ -244,12 +366,8 @@ fn create_decoder(config: &VideoDecoderConfig) -> Result<ffmpeg::decoder::Video>
         }
     }
 
-    let codec = ffmpeg::decoder::find(sw_id)
-        .ok_or_else(|| anyhow!("Software decoder for {sw_id:?} not available"))?;
-    let decoder = open_decoder(codec, &config.config_buffer)?;
-    info!("Using software decoder {}", codec.name());
-
-    Ok(decoder)
+    let decoder = open_software_decoder(config, dimensions)?;
+    Ok((decoder, dimensions, false))
 }
 
 fn dma_buf_image(frame: &frame::Video) -> Option<DmaBufImage> {
@@ -306,6 +424,21 @@ fn dma_buf_image(frame: &frame::Video) -> Option<DmaBufImage> {
             }
         }
     };
+
+    // Single-plane contiguous V4L2_PIX_FMT_NV12 / P010 exported with 1 plane descriptor still needs
+    // a second plane descriptor for EGL_EXT_image_dma_buf_import.
+    if (image.fourcc == DRM_FORMAT_NV12 || image.fourcc == DRM_FORMAT_P010)
+        && image.plane_count == 1
+    {
+        let plane0 = image.planes[0];
+        image.planes[1] = DmaBufPlane {
+            fd: plane0.fd,
+            offset: plane0.offset + plane0.pitch * image.height,
+            pitch: plane0.pitch,
+            modifier: plane0.modifier,
+        };
+        image.plane_count = 2;
+    }
 
     Some(image)
 }
@@ -382,6 +515,10 @@ impl RgbaConverter {
 
 struct DecoderLoop<F> {
     decoder: ffmpeg::decoder::Video,
+    config: VideoDecoderConfig,
+    dimensions: (c_int, c_int, c_int, c_int),
+    is_hw: bool,
+    decoded_any_frame: bool,
     frame_queue: Arc<Mutex<VecDeque<DecodedFrame>>>,
     frame_result_callback: Arc<F>,
     timestamps: VecDeque<(i64, Duration)>,
@@ -392,6 +529,31 @@ struct DecoderLoop<F> {
 }
 
 impl<F: Fn(Result<Duration>) + Send + Sync + 'static> DecoderLoop<F> {
+    fn fallback_to_software(&mut self, packet: &Packet) -> bool {
+        if !self.is_hw {
+            return false;
+        }
+        self.is_hw = false;
+        match open_software_decoder(&self.config, self.dimensions) {
+            Ok(sw_decoder) => {
+                self.decoder = sw_decoder;
+                self.consecutive_errors = 0;
+                if !self.config.config_buffer.is_empty() {
+                    let mut cfg_pkt = Packet::copy(&self.config.config_buffer);
+                    cfg_pkt.set_pts(packet.pts());
+                    cfg_pkt.set_dts(packet.dts());
+                    let _ = self.decoder.send_packet(&cfg_pkt);
+                }
+                let _ = self.decoder.send_packet(packet);
+                true
+            }
+            Err(e) => {
+                error!("Failed to open software fallback decoder: {e}");
+                false
+            }
+        }
+    }
+
     fn send_packet(&mut self, timestamp: Duration, data: &[u8]) -> Result<()> {
         let pts = self.next_pts;
         self.next_pts += 1;
@@ -417,8 +579,17 @@ impl<F: Fn(Result<Duration>) + Send + Sync + 'static> DecoderLoop<F> {
                     thread::sleep(SEND_RETRY_INTERVAL);
                 }
                 Err(e) => {
+                    if self.is_hw && !self.decoded_any_frame {
+                        error!("Hardware decoder send_packet failed ({e}), switching to software");
+                        if self.fallback_to_software(&packet) {
+                            return Ok(());
+                        }
+                    }
                     self.consecutive_errors += 1;
                     if self.consecutive_errors > MAX_CONSECUTIVE_ERRORS {
+                        if self.fallback_to_software(&packet) {
+                            return Ok(());
+                        }
                         bail!("Too many decoder errors: {e}");
                     }
                     warn!("Decoder error: {e}");
@@ -437,10 +608,23 @@ impl<F: Fn(Result<Duration>) + Send + Sync + 'static> DecoderLoop<F> {
         loop {
             let mut av_frame = frame::Video::empty();
             match self.decoder.receive_frame(&mut av_frame) {
-                Ok(()) => self.push_frame(av_frame),
+                Ok(()) => {
+                    self.decoded_any_frame = true;
+                    self.push_frame(av_frame);
+                }
                 Err(ffmpeg::Error::Other { errno: EAGAIN }) | Err(ffmpeg::Error::Eof) => break,
                 Err(e) => {
                     warn!("Decoder receive error: {e}");
+                    if self.is_hw && !self.decoded_any_frame {
+                        self.consecutive_errors += 1;
+                        if self.consecutive_errors >= 3 {
+                            error!(
+                                "Hardware decoder receive_frame failed repeatedly ({e}), switching to software"
+                            );
+                            let empty = Packet::empty();
+                            self.fallback_to_software(&empty);
+                        }
+                    }
                     break;
                 }
             }
@@ -448,16 +632,15 @@ impl<F: Fn(Result<Duration>) + Send + Sync + 'static> DecoderLoop<F> {
     }
 
     fn push_frame(&mut self, av_frame: frame::Video) {
-        let Some(pts) = av_frame.pts().or(av_frame.timestamp()) else {
-            warn!("Decoded frame without timestamp");
-            return;
-        };
-        let Some(timestamp) = self
-            .timestamps
-            .iter()
-            .find_map(|(p, timestamp)| (*p == pts).then_some(*timestamp))
-        else {
-            warn!("Decoded frame with unknown timestamp");
+        let timestamp = if let Some(pts) = av_frame.pts().or(av_frame.timestamp())
+            && let Some(pos) = self.timestamps.iter().position(|(p, _)| *p == pts)
+        {
+            let (_, ts) = self.timestamps.remove(pos).unwrap();
+            ts
+        } else if let Some((_, ts)) = self.timestamps.pop_front() {
+            ts
+        } else {
+            warn!("Decoded frame without matching timestamp");
             return;
         };
 
@@ -530,10 +713,10 @@ pub fn video_decoder_split(
         let running = Arc::clone(&running);
         let frame_queue = Arc::clone(&frame_queue);
         move || {
-            let decoder = match create_decoder(&config) {
-                Ok(decoder) => {
+            let (decoder, dimensions, is_hw) = match create_decoder(&config) {
+                Ok(res) => {
                     ready_sender.send(Ok(())).ok();
-                    decoder
+                    res
                 }
                 Err(e) => {
                     ready_sender.send(Err(e)).ok();
@@ -542,16 +725,21 @@ pub fn video_decoder_split(
             };
 
             let frame_result_callback = Arc::new(frame_result_callback);
+            let max_queued_frames = (2. * config.max_buffering_frames).ceil() as usize;
 
             let mut decoder_loop = DecoderLoop {
                 decoder,
+                config,
+                dimensions,
+                is_hw,
+                decoded_any_frame: false,
                 frame_queue: Arc::clone(&frame_queue),
                 frame_result_callback: Arc::clone(&frame_result_callback),
                 timestamps: VecDeque::new(),
-                next_pts: 0,
+                next_pts: 1,
                 converter: RgbaConverter::new(),
                 // 2x: keep the target buffering in the middle of the max amount of queuable frames
-                max_queued_frames: (2. * config.max_buffering_frames).ceil() as usize,
+                max_queued_frames,
                 consecutive_errors: 0,
             };
 
