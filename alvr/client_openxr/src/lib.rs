@@ -1,3 +1,4 @@
+mod babble;
 mod c_api;
 mod extra_extensions;
 mod graphics;
@@ -5,6 +6,8 @@ mod interaction;
 mod lobby;
 mod passthrough;
 mod stream;
+
+pub use babble::*;
 
 use crate::stream::ParsedStreamConfig;
 use alvr_client_core::{ClientCapabilities, ClientCoreContext, ClientCoreEvent};
@@ -427,6 +430,7 @@ pub fn entry_point() {
         };
         let lobby_interaction_sources = InteractionSourcesConfig {
             face_tracking: None,
+            babble_osc_port: None,
             body_tracking: lobby_body_tracking_config,
             prefers_multimodal_input: true,
         };

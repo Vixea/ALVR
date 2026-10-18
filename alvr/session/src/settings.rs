@@ -940,6 +940,11 @@ pub struct FaceTrackingConfig {
         help = "Use external combined gaze received over OSC/UDP on localhost instead of headset eye directions. This input is shared by foveated encoding and social output. Turn this off to use headset eye tracking."
     ))]
     pub eye_tracking_osc_override: Switch<OscPort>,
+    #[schema(strings(
+        display_name = "Babble OSC receiver",
+        help = "Receive mouth and eye expressions from Babble / Babble-Frame-Runtime via OSC on localhost (default port 8888)."
+    ))]
+    pub babble_osc: Switch<OscPort>,
     pub sink: FaceTrackingSinkConfig,
 }
 
@@ -1988,6 +1993,10 @@ pub fn session_settings_default() -> SettingsDefault {
                     eye_tracking_osc_override: SwitchDefault {
                         enabled: false,
                         content: OscPortDefault { port: 9945 },
+                    },
+                    babble_osc: SwitchDefault {
+                        enabled: true,
+                        content: OscPortDefault { port: 8888 },
                     },
                     sink: FaceTrackingSinkConfigDefault {
                         social_presence: SwitchDefault {

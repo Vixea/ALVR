@@ -1,5 +1,5 @@
 use crate::{
-    Platform,
+    BabbleReceiver, Platform,
     extra_extensions::{
         self, BodyTrackerBD, BodyTrackerFB, EyeTrackerSocial, FaceTracker2FB, FaceTrackerBD,
         FacialTrackerHTC, MotionTrackerBD, MultimodalMeta,
@@ -127,6 +127,7 @@ pub enum FaceExpressionsTracker {
         eye: Option<FacialTrackerHTC>,
         lip: Option<FacialTrackerHTC>,
     },
+    Babble(BabbleReceiver),
 }
 
 pub struct FaceSources {
@@ -144,9 +145,10 @@ pub enum BodyTracker {
     MotionBD(MotionTrackerBD),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct InteractionSourcesConfig {
     pub face_tracking: Option<FaceTrackingSourcesConfig>,
+    pub babble_osc_port: Option<u16>,
     pub body_tracking: Option<BodyTrackingSourcesConfig>,
     pub prefers_multimodal_input: bool,
 }
@@ -156,12 +158,16 @@ impl InteractionSourcesConfig {
         let face_tracking = config.settings.headset.face_tracking.as_option();
         let eye_tracking_osc_override =
             face_tracking.is_some_and(|c| c.eye_tracking_osc_override.enabled());
+        let babble_osc_port = face_tracking
+            .and_then(|c| c.babble_osc.as_option())
+            .map(|c| c.port);
 
         Self {
             face_tracking: face_tracking.map(|c| c.sources.clone()).filter(|sources| {
                 !eye_tracking_osc_override
                     || *sources == FaceTrackingSourcesConfig::PreferFullFaceTracking
             }),
+            babble_osc_port,
             body_tracking: config
                 .settings
                 .headset
@@ -564,12 +570,12 @@ impl InteractionContext {
             self.multimodal_hands_enabled = true;
         }
 
-        if let Some(config) = &config.face_tracking {
+        if let Some(face_config) = &config.face_tracking {
             // Note: this is actually used by multiple vendors
             self.face_sources.eyes_social =
                 check_ext_object("EyeTrackerSocial", EyeTrackerSocial::new(&self.xr_session));
 
-            if matches!(config, FaceTrackingSourcesConfig::PreferFullFaceTracking) {
+            if matches!(face_config, FaceTrackingSourcesConfig::PreferFullFaceTracking) {
                 if let Some(tracker) = check_ext_object(
                     "FaceTracker2FB",
                     FaceTracker2FB::new(self.xr_session.clone(), true, true),
@@ -585,6 +591,21 @@ impl InteractionContext {
                 }
                 // For vive, face trackers are always created at startup regardless of settings, and
                 // also cannot be destroyed early.
+            }
+        }
+
+        if self.face_sources.face_expressions_tracker.is_none() {
+            if let Some(port) = config.babble_osc_port {
+                match BabbleReceiver::new(port) {
+                    Ok(receiver) => {
+                        info!("Babble OSC receiver bound to 127.0.0.1:{port}");
+                        self.face_sources.face_expressions_tracker =
+                            Some(FaceExpressionsTracker::Babble(receiver));
+                    }
+                    Err(e) => {
+                        warn!("Failed to bind Babble OSC receiver on port {port}: {e}");
+                    }
+                }
             }
         }
 
@@ -1045,6 +1066,9 @@ pub fn get_face_data(
                     .and_then(|tracker| tracker.get_facial_expressions(xr_time).ok().flatten());
 
                 Some(FaceExpressions::Htc { eye, lip })
+            }
+            FaceExpressionsTracker::Babble(receiver) => {
+                receiver.get_face_expressions().map(FaceExpressions::Fb)
             }
         }
     } else {
