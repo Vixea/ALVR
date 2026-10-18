@@ -20,7 +20,7 @@ use alvr_session::{BodyTrackingBDConfig, BodyTrackingSourcesConfig, PerformanceL
 use alvr_system_info::Platform;
 use extra_extensions::{
     BD_MOTION_TRACKING_EXTENSION_NAME, META_BODY_TRACKING_FIDELITY_EXTENSION_NAME,
-    PICO_CONFIGURATION_EXTENSION_NAME,
+    PICO_CONFIGURATION_EXTENSION_NAME, VALVE_FRAME_CONTROLLER_INTERACTION_EXTENSION_NAME,
 };
 use interaction::{InteractionContext, InteractionSourcesConfig};
 use lobby::Lobby;
@@ -249,6 +249,7 @@ pub fn entry_point() {
         META_BODY_TRACKING_FIDELITY_EXTENSION_NAME,
         BD_MOTION_TRACKING_EXTENSION_NAME,
         PICO_CONFIGURATION_EXTENSION_NAME,
+        VALVE_FRAME_CONTROLLER_INTERACTION_EXTENSION_NAME,
     ]
     .into_iter()
     .map(|s| s.as_bytes().to_vec())
@@ -264,9 +265,8 @@ pub fn entry_point() {
         .iter()
         .map(|vec| {
             CStr::from_bytes_with_nul(vec)
-                .unwrap()
-                .to_str()
-                .unwrap()
+                .map(|s| s.to_str().unwrap())
+                .unwrap_or_else(|_| std::str::from_utf8(vec).unwrap())
                 .to_owned()
         })
         .collect::<Vec<_>>();

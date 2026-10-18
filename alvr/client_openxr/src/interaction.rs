@@ -3,6 +3,7 @@ use crate::{
     extra_extensions::{
         self, BodyTrackerBD, BodyTrackerFB, EyeTrackerSocial, FaceTracker2FB, FaceTrackerBD,
         FacialTrackerHTC, MotionTrackerBD, MultimodalMeta,
+        VALVE_FRAME_CONTROLLER_INTERACTION_EXTENSION_NAME,
     },
 };
 use alvr_common::{
@@ -57,6 +58,10 @@ fn get_controller_offset(platform: Platform, is_right_hand: bool) -> Pose {
         },
         Platform::SamsungGalaxyXR => Pose {
             position: Vec3::new(0.0, 0.0, 0.055),
+            orientation: Quat::IDENTITY,
+        },
+        Platform::SteamFrame => Pose {
+            position: Vec3::new(0.0, 0.0, 0.0),
             orientation: Quat::IDENTITY,
         },
         _ => Pose::IDENTITY,
@@ -217,6 +222,13 @@ impl InteractionContext {
             p if p.is_pico() => PICO4S_CONTROLLER_PROFILE_PATH,
             p if p.is_vive() => FOCUS3_CONTROLLER_PROFILE_PATH,
             p if p.is_yvr() => YVR_CONTROLLER_PROFILE_PATH,
+            Platform::SteamFrame
+                if extra_extensions
+                    .iter()
+                    .any(|e| e == VALVE_FRAME_CONTROLLER_INTERACTION_EXTENSION_NAME) =>
+            {
+                STEAM_FRAME_CONTROLLER_PROFILE_PATH
+            }
             _ => QUEST_CONTROLLER_PROFILE_PATH,
         };
         let controllers_profile_id = alvr_common::hash_string(controllers_profile_path);

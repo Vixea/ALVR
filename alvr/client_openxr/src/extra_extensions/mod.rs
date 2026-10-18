@@ -22,6 +22,9 @@ pub use multimodal_input::*;
 pub use passthrough_fb::*;
 pub use passthrough_htc::*;
 
+pub const VALVE_FRAME_CONTROLLER_INTERACTION_EXTENSION_NAME: &str =
+    "XR_VALVE_frame_controller_interaction";
+
 use openxr::{self as xr, sys};
 use std::ffi::CString;
 use std::mem;
