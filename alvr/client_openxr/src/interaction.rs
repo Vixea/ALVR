@@ -598,7 +598,7 @@ impl InteractionContext {
             if let Some(port) = config.babble_osc_port {
                 match BabbleReceiver::new(port) {
                     Ok(receiver) => {
-                        info!("Babble OSC receiver bound to 127.0.0.1:{port}");
+                        info!("Babble OSC receiver bound on port {port}");
                         self.face_sources.face_expressions_tracker =
                             Some(FaceExpressionsTracker::Babble(receiver));
                     }

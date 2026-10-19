@@ -1,5 +1,6 @@
 use alvr_common::{
     anyhow::Result,
+    info,
     parking_lot::Mutex,
     warn,
 };
@@ -15,6 +16,9 @@ const BABBLE_TIMEOUT: Duration = Duration::from_secs(1);
 #[derive(Default)]
 struct BabbleState {
     last_received: Option<Instant>,
+    last_log: Option<Instant>,
+    packets_received: u64,
+
     // Eye lids / openness (1.0 = open, 0.0 = closed)
     left_eye_lid: Option<f32>,
     right_eye_lid: Option<f32>,
@@ -36,7 +40,8 @@ pub struct BabbleReceiver {
 
 impl BabbleReceiver {
     pub fn new(port: u16) -> Result<Self> {
-        let socket = UdpSocket::bind(format!("127.0.0.1:{port}"))?;
+        let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))
+            .or_else(|_| UdpSocket::bind(format!("127.0.0.1:{port}")))?;
         socket.set_nonblocking(true)?;
 
         Ok(Self {
@@ -50,11 +55,17 @@ impl BabbleReceiver {
         let mut state = self.state.lock();
 
         loop {
-            match self.socket.recv(&mut buffer) {
-                Ok(size) => {
-                    if let Ok((_, packet)) = rosc::decoder::decode_udp(&buffer[..size]) {
-                        Self::process_packet(packet, &mut state);
-                        state.last_received = Some(Instant::now());
+            match self.socket.recv_from(&mut buffer) {
+                Ok((size, _)) => {
+                    match rosc::decoder::decode_udp(&buffer[..size]) {
+                        Ok((_, packet)) => {
+                            Self::process_packet(packet, &mut state);
+                            state.last_received = Some(Instant::now());
+                            state.packets_received += 1;
+                        }
+                        Err(e) => {
+                            warn!("Failed to decode Babble OSC packet: {e}");
+                        }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -63,6 +74,28 @@ impl BabbleReceiver {
                     break;
                 }
             }
+        }
+
+        let now = Instant::now();
+        let should_log = match state.last_log {
+            Some(last) => now.duration_since(last) >= Duration::from_secs(5),
+            None => true,
+        };
+        if should_log {
+            if state.packets_received > 0 {
+                info!(
+                    "Babble OSC: {} packets in last 5s (Lid L: {:.2?}, R: {:.2?}, Widen L: {:.2?}, R: {:.2?})",
+                    state.packets_received,
+                    state.left_eye_lid,
+                    state.right_eye_lid,
+                    state.left_eye_widen,
+                    state.right_eye_widen,
+                );
+            } else {
+                warn!("Babble OSC: No packets received in last 5s (listening on port)");
+            }
+            state.packets_received = 0;
+            state.last_log = Some(now);
         }
 
         let last_received = state.last_received?;
@@ -85,7 +118,12 @@ impl BabbleReceiver {
     }
 
     fn process_message(msg: OscMessage, state: &mut BabbleState) {
-        let name = msg.addr.rsplit('/').next().unwrap_or(&msg.addr);
+        let name = msg
+            .addr
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&msg.addr);
         let val = match msg.args.first() {
             Some(OscType::Float(f)) => *f,
             Some(OscType::Double(d)) => *d as f32,
@@ -94,14 +132,14 @@ impl BabbleReceiver {
         };
 
         match name {
-            "LeftEyeLid" => state.left_eye_lid = Some(val),
-            "RightEyeLid" => state.right_eye_lid = Some(val),
-            "LeftEyeWiden" => state.left_eye_widen = Some(val),
-            "RightEyeWiden" => state.right_eye_widen = Some(val),
-            "LeftEyeSquint" => state.left_eye_squint = Some(val),
-            "RightEyeSquint" => state.right_eye_squint = Some(val),
-            "LeftEyeBrow" => state.left_eye_brow = Some(val),
-            "RightEyeBrow" => state.right_eye_brow = Some(val),
+            "LeftEyeLid" | "EyeLidLeft" | "leftEyeLid" => state.left_eye_lid = Some(val),
+            "RightEyeLid" | "EyeLidRight" | "rightEyeLid" => state.right_eye_lid = Some(val),
+            "LeftEyeWiden" | "EyeWidenLeft" | "leftEyeWiden" => state.left_eye_widen = Some(val),
+            "RightEyeWiden" | "EyeWidenRight" | "rightEyeWiden" => state.right_eye_widen = Some(val),
+            "LeftEyeSquint" | "EyeSquintLeft" | "leftEyeSquint" => state.left_eye_squint = Some(val),
+            "RightEyeSquint" | "EyeSquintRight" | "rightEyeSquint" => state.right_eye_squint = Some(val),
+            "LeftEyeBrow" | "EyeBrowLeft" | "leftEyeBrow" => state.left_eye_brow = Some(val),
+            "RightEyeBrow" | "EyeBrowRight" | "rightEyeBrow" => state.right_eye_brow = Some(val),
             "CombinedEyeWiden" => {
                 state.left_eye_widen = Some(val);
                 state.right_eye_widen = Some(val);

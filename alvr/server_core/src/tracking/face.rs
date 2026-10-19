@@ -1,8 +1,12 @@
-use alvr_common::{anyhow::Result, glam::EulerRot};
+use alvr_common::{anyhow::Result, glam::EulerRot, info, warn};
 use alvr_packets::{FaceData, FaceExpressions};
 use alvr_session::FaceTrackingSocialPresenceSinkConfig;
 use rosc::{OscMessage, OscPacket, OscType};
-use std::{f32::consts::PI, net::UdpSocket};
+use std::{
+    f32::consts::PI,
+    net::UdpSocket,
+    time::{Duration, Instant},
+};
 
 const RAD_TO_DEG: f32 = 180.0 / PI;
 
@@ -12,6 +16,8 @@ pub struct FaceTrackingSink {
     config: FaceTrackingSocialPresenceSinkConfig,
     socket: UdpSocket,
     packet_buffer: Vec<u8>,
+    last_log: Instant,
+    packets_sent: u64,
 }
 
 impl FaceTrackingSink {
@@ -21,18 +27,24 @@ impl FaceTrackingSink {
             FaceTrackingSocialPresenceSinkConfig::VrcFaceTracking => VRCFT_PORT,
         };
 
-        let socket = UdpSocket::bind(format!("127.0.0.1:{local_osc_port}"))?;
+        let socket = UdpSocket::bind(format!("127.0.0.1:{local_osc_port}"))
+            .or_else(|_| UdpSocket::bind("127.0.0.1:0"))?;
         socket.connect(format!("127.0.0.1:{port}"))?;
+
+        info!("Face tracking sink connected to 127.0.0.1:{port}");
 
         Ok(Self {
             config,
             socket,
             packet_buffer: vec![],
+            last_log: Instant::now(),
+            packets_sent: 0,
         })
     }
 
-    fn send_osc_message(&self, path: &str, args: Vec<OscType>) {
-        self.socket
+    fn send_osc_message(&mut self, path: &str, args: Vec<OscType>) {
+        if self
+            .socket
             .send(
                 &rosc::encoder::encode(&OscPacket::Message(OscMessage {
                     addr: path.into(),
@@ -40,7 +52,10 @@ impl FaceTrackingSink {
                 }))
                 .unwrap(),
             )
-            .ok();
+            .is_ok()
+        {
+            self.packets_sent += 1;
+        }
     }
 
     fn append_packet_vrcft(&mut self, prefix: [u8; 8], data: &[f32]) {
@@ -99,6 +114,14 @@ impl FaceTrackingSink {
                         vec![OscType::Float(blink)],
                     );
                 }
+
+                if self.last_log.elapsed() >= Duration::from_secs(5) {
+                    if self.packets_sent > 0 {
+                        info!("VRChat Eye OSC sink: {} packets sent in last 5s", self.packets_sent);
+                    }
+                    self.packets_sent = 0;
+                    self.last_log = Instant::now();
+                }
             }
             FaceTrackingSocialPresenceSinkConfig::VrcFaceTracking => {
                 self.packet_buffer.clear();
@@ -111,12 +134,18 @@ impl FaceTrackingSink {
                     self.append_packet_vrcft(*b"CombQuat", &quat.to_array());
                 }
 
-                match &face_data.face_expressions {
+                let expr_tag = match &face_data.face_expressions {
                     Some(FaceExpressions::Fb(items)) => {
                         self.append_packet_vrcft(*b"Face2Fb\0", items);
+                        if items.len() >= 14 {
+                            format!("Fb (EyesClosed L={:.2}, R={:.2})", items[12], items[13])
+                        } else {
+                            "Fb".to_string()
+                        }
                     }
                     Some(FaceExpressions::Bd(items)) => {
                         self.append_packet_vrcft(*b"FacePico", items);
+                        "Bd".to_string()
                     }
                     Some(FaceExpressions::Htc { eye, lip }) => {
                         if let Some(arr) = eye {
@@ -126,11 +155,34 @@ impl FaceTrackingSink {
                         if let Some(arr) = lip {
                             self.append_packet_vrcft(*b"LipHtc\0\0", arr);
                         }
+                        "Htc".to_string()
                     }
-                    None => (),
+                    None => "None".to_string(),
+                };
+
+                if !self.packet_buffer.is_empty() {
+                    if let Err(e) = self.socket.send(&self.packet_buffer) {
+                        warn!("Failed to send tracking data to VRCFT: {e}");
+                    } else {
+                        self.packets_sent += 1;
+                    }
                 }
 
-                self.socket.send(&self.packet_buffer).ok();
+                if self.last_log.elapsed() >= Duration::from_secs(5) {
+                    if self.packets_sent > 0 {
+                        info!(
+                            "VRCFT sink: {} packets sent in last 5s (expressions: {})",
+                            self.packets_sent, expr_tag
+                        );
+                    } else {
+                        warn!(
+                            "VRCFT sink: 0 packets sent in last 5s (expressions: {})",
+                            expr_tag
+                        );
+                    }
+                    self.packets_sent = 0;
+                    self.last_log = Instant::now();
+                }
             }
         }
     }
