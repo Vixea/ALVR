@@ -29,6 +29,11 @@ pub fn registered_button_set(
             .unwrap()
             .button_set
             .clone(),
+        ControllersEmulationMode::ValveFrame => CONTROLLER_PROFILE_INFO
+            .get(&STEAM_FRAME_CONTROLLER_PROFILE_ID)
+            .unwrap()
+            .button_set
+            .clone(),
         ControllersEmulationMode::ValveIndex => CONTROLLER_PROFILE_INFO
             .get(&INDEX_CONTROLLER_PROFILE_ID)
             .unwrap()
@@ -255,6 +260,12 @@ pub fn automatic_bindings(
         let click = click(*LEFT_MENU_CLICK_ID);
         if d_set.contains(&*LEFT_MENU_CLICK_ID) {
             bindings.extend(map_button_pair_automatic(click, click, config));
+        } else if d_set.contains(&*LEFT_VIEW_CLICK_ID) {
+            bindings.extend(map_button_pair_automatic(
+                click,
+                ct(d_set, *LEFT_VIEW_CLICK_ID, *LEFT_VIEW_TOUCH_ID),
+                config,
+            ));
         } else if d_set.contains(&*LEFT_SYSTEM_CLICK_ID) {
             bindings.extend(map_button_pair_automatic(
                 click,
@@ -339,6 +350,12 @@ pub fn automatic_bindings(
             bindings.extend(map_button_pair_automatic(
                 source,
                 ct(d_set, *LEFT_A_CLICK_ID, *LEFT_A_TOUCH_ID),
+                config,
+            ));
+        } else if d_set.contains(&*LEFT_DPAD_DOWN_CLICK_ID) {
+            bindings.extend(map_button_pair_automatic(
+                source,
+                ct(d_set, *LEFT_DPAD_DOWN_CLICK_ID, *LEFT_DPAD_DOWN_TOUCH_ID),
                 config,
             ));
         } else if d_set.contains(&*LEFT_TRACKPAD_CLICK_ID) {
@@ -434,6 +451,12 @@ pub fn automatic_bindings(
             bindings.extend(map_button_pair_automatic(
                 source,
                 ct(d_set, *LEFT_B_CLICK_ID, *LEFT_B_TOUCH_ID),
+                config,
+            ));
+        } else if d_set.contains(&*LEFT_DPAD_LEFT_CLICK_ID) {
+            bindings.extend(map_button_pair_automatic(
+                source,
+                ct(d_set, *LEFT_DPAD_LEFT_CLICK_ID, *LEFT_DPAD_LEFT_TOUCH_ID),
                 config,
             ));
         }

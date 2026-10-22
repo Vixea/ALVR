@@ -867,6 +867,8 @@ pub enum HeadsetEmulationMode {
     #[schema(strings(display_name = "Pico 4"))]
     Pico4,
     Vive,
+    #[schema(strings(display_name = "Steam Frame"))]
+    SteamFrame,
     Custom {
         serial_number: String,
     },
@@ -1021,6 +1023,8 @@ pub enum ControllersEmulationMode {
     Pico4,
     #[schema(strings(display_name = "PSVR2 Sense Controller"))]
     PSVR2Sense,
+    #[schema(strings(display_name = "Valve Frame Controller"))]
+    ValveFrame,
     #[schema(strings(display_name = "Valve Index"))]
     ValveIndex,
     #[schema(strings(display_name = "Vive Wand"))]

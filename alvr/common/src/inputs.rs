@@ -5,10 +5,10 @@ use std::{
 };
 
 macro_rules! interaction_profile {
-    ($ty:ident, $path:expr) => {
+    ($ty:ident, $path:expr $(, $postfix:expr)?) => {
         pastey::paste! {
             pub const [<$ty _CONTROLLER_PROFILE_PATH>]: &str =
-                concat!("/interaction_profiles/", $path, "_controller");
+                concat!("/interaction_profiles/", $path, "_controller" $(, $postfix)?);
             pub static [<$ty _CONTROLLER_PROFILE_ID>]: LazyLock<u64> =
                 LazyLock::new(|| hash_string([<$ty _CONTROLLER_PROFILE_PATH>]));
         }
@@ -25,11 +25,7 @@ interaction_profile!(PICO_G3, "bytedance/pico_g3");
 interaction_profile!(PSVR2, "sony/playstation_vr2_sense");
 interaction_profile!(FOCUS3, "htc/vive_focus3");
 interaction_profile!(YVR, "yvr/touch");
-
-pub const STEAM_FRAME_CONTROLLER_PROFILE_PATH: &str =
-    "/interaction_profiles/valve/frame_controller_valve";
-pub static STEAM_FRAME_CONTROLLER_PROFILE_ID: LazyLock<u64> =
-    LazyLock::new(|| hash_string(STEAM_FRAME_CONTROLLER_PROFILE_PATH));
+interaction_profile!(STEAM_FRAME, "valve/frame", "_valve");
 
 macro_rules! devices {
     ($(($name:ident, $path:expr),)*) => {
@@ -148,6 +144,8 @@ controller_inputs! {
     (DPAD_RIGHT_TOUCH, "dpad_right/touch", Binary),
     (SHOULDER_CLICK, "shoulder/click", Binary),
     (SHOULDER_TOUCH, "shoulder/touch", Binary),
+    (BUMPER_CLICK, "bumper/click", Binary),
+    (BUMPER_TOUCH, "bumper/touch", Binary),
     (SQUEEZE_CLICK, "squeeze/click", Binary),
     (SQUEEZE_TOUCH, "squeeze/touch", Binary),
     (SQUEEZE_VALUE, "squeeze/value", Scalar),
@@ -590,6 +588,7 @@ pub static CONTROLLER_PROFILE_INFO: LazyLock<HashMap<u64, InteractionProfileInfo
                         *LEFT_THUMBSTICK_Y_ID,
                         *LEFT_THUMBSTICK_CLICK_ID,
                         *LEFT_THUMBSTICK_TOUCH_ID,
+                        *LEFT_THUMBREST_TOUCH_ID,
                         *RIGHT_SYSTEM_CLICK_ID,
                         *RIGHT_SYSTEM_TOUCH_ID,
                         *RIGHT_MENU_CLICK_ID,
@@ -614,6 +613,7 @@ pub static CONTROLLER_PROFILE_INFO: LazyLock<HashMap<u64, InteractionProfileInfo
                         *RIGHT_THUMBSTICK_Y_ID,
                         *RIGHT_THUMBSTICK_CLICK_ID,
                         *RIGHT_THUMBSTICK_TOUCH_ID,
+                        *RIGHT_THUMBREST_TOUCH_ID,
                     ]
                     .into_iter()
                     .collect(),

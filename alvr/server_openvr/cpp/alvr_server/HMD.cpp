@@ -88,6 +88,12 @@ bool Hmd::activate() {
 
     vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/proximity", &m_proximity);
 
+    vr::VRInputComponentHandle_t dummy_component;
+    vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/input/system/click", &dummy_component);
+    vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/input/system/touch", &dummy_component);
+    vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/input/volume_up/click", &dummy_component);
+    vr::VRDriverInput()->CreateBooleanComponent(this->prop_container, "/input/volume_down/click", &dummy_component);
+
     float originalIPD
         = vr::VRSettings()->GetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float);
     vr::VRSettings()->SetFloat(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_IPD_Float, 0.063);

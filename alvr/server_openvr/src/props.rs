@@ -126,6 +126,7 @@ fn serial_number(device_id: u64) -> String {
             HeadsetEmulationMode::QuestPro => "230YC0XXXX00XX".into(),
             HeadsetEmulationMode::Pico4 => "VRLINKHMDPICO4".into(),
             HeadsetEmulationMode::Vive => "HTCVive-001".into(),
+            HeadsetEmulationMode::SteamFrame => "STEAMFRAME-001".into(),
             HeadsetEmulationMode::Custom { serial_number, .. } => serial_number.clone(),
         }
     } else if device_id == *HAND_LEFT_ID || device_id == *HAND_RIGHT_ID {
@@ -138,6 +139,7 @@ fn serial_number(device_id: u64) -> String {
                 ControllersEmulationMode::RiftSTouch
                 | ControllersEmulationMode::Pico4
                 | ControllersEmulationMode::PSVR2Sense
+                | ControllersEmulationMode::ValveFrame
                 | ControllersEmulationMode::ValveIndex
                 | ControllersEmulationMode::ViveWand
                 | ControllersEmulationMode::ViveTracker => "ALVR Remote Controller",
@@ -324,6 +326,22 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
                 set_prop(DriverVersionString, "");
                 set_icons("{htc}/icons/vive_headset");
             }
+            HeadsetEmulationMode::SteamFrame => {
+                set_prop(TrackingSystemNameString, "vrlink");
+                set_prop(ModelNumberString, "Steam Frame");
+                set_prop(ManufacturerNameString, "Valve");
+                set_prop(RenderModelNameString, "generic_hmd");
+                set_prop(RegisteredDeviceTypeString, "frame_hmd");
+                set_prop(DriverVersionString, "");
+                set_prop(ExpectedControllerTypeString, "frame_controller");
+                set_prop(ExpectedControllerCountInt32, "2");
+                set_prop(
+                    InputProfilePathString,
+                    "{frame_hmd}/input/input_profile.json",
+                );
+                set_prop(ControllerTypeString, "frame_hmd");
+                set_icons("{vrlink}/icons/headset_steamframe");
+            }
             HeadsetEmulationMode::Custom { .. } => (),
         }
 
@@ -494,6 +512,38 @@ pub extern "C" fn set_device_openvr_props(instance_ptr: *mut c_void, device_id: 
                     set_prop(
                         InputProfilePathString,
                         "{alvr_server}/input/playstation_vr2_sense_controller_profile.json",
+                    );
+                }
+                ControllersEmulationMode::ValveFrame => {
+                    set_prop(TrackingSystemNameString, "frame_controller");
+                    set_prop(ManufacturerNameString, "Valve");
+                    if left_hand {
+                        set_prop(ModelNumberString, "Valve Frame (Left Controller)");
+                        set_prop(
+                            RenderModelNameString,
+                            "{frame_controller}frame_controller_left",
+                        );
+                        set_prop(
+                            RegisteredDeviceTypeString,
+                            "valve/frame_controller_valve_Left",
+                        );
+                        set_icons("{frame_controller}/icons/left_frame_controller");
+                    } else if right_hand {
+                        set_prop(ModelNumberString, "Valve Frame (Right Controller)");
+                        set_prop(
+                            RenderModelNameString,
+                            "{frame_controller}frame_controller_right",
+                        );
+                        set_prop(
+                            RegisteredDeviceTypeString,
+                            "valve/frame_controller_valve_Right",
+                        );
+                        set_icons("{frame_controller}/icons/right_frame_controller");
+                    }
+                    set_prop(ControllerTypeString, "frame_controller");
+                    set_prop(
+                        InputProfilePathString,
+                        "{frame_controller}/input/frame_controller_profile.json",
                     );
                 }
                 ControllersEmulationMode::ValveIndex => {
