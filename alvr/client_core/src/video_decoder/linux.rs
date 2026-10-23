@@ -34,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-const INPUT_QUEUE_SIZE: usize = 8;
+const INPUT_QUEUE_SIZE: usize = 32;
 const INPUT_RECV_TIMEOUT: Duration = Duration::from_millis(10);
 const SEND_RETRY_INTERVAL: Duration = Duration::from_micros(500);
 const MAX_SEND_RETRIES: usize = 200; // 100ms
@@ -128,36 +128,28 @@ pub struct VideoDecoderSource {
     decoder_thread: Option<JoinHandle<()>>,
     frame_queue: Arc<Mutex<VecDeque<DecodedFrame>>>,
     current_frame: Option<DecodedFrame>,
-    config: VideoDecoderConfig,
-    buffering_running_average: f32,
 }
 
 impl VideoDecoderSource {
     // The returned pointer (to a LinuxVideoFrame) is valid until the next call of this function
+    // or until release_frame() is called.
     pub fn dequeue_frame(&mut self) -> Option<(Duration, *mut c_void)> {
-        let mut frame_queue_lock = self.frame_queue.lock();
-
-        // use running average to give more weight to recent samples
-        self.buffering_running_average = self.buffering_running_average
-            * self.config.buffering_history_weight
-            + frame_queue_lock.len() as f32 * (1. - self.config.buffering_history_weight);
-        if self.buffering_running_average > self.config.max_buffering_frames
-            && frame_queue_lock.len() > 1
-        {
-            frame_queue_lock.pop_front();
-        }
-
-        // Release the previous frame now that the renderer is done with it
-        let frame = frame_queue_lock.pop_front();
-        drop(frame_queue_lock);
         self.current_frame = None;
 
-        let frame = self.current_frame.insert(frame?);
+        let mut frame_queue_lock = self.frame_queue.lock();
+        let frame = frame_queue_lock.pop_front()?;
+        drop(frame_queue_lock);
+
+        let frame = self.current_frame.insert(frame);
 
         Some((
             frame.timestamp,
             ptr::from_ref(&frame.image).cast_mut().cast(),
         ))
+    }
+
+    pub fn release_frame(&mut self) {
+        self.current_frame = None;
     }
 }
 
@@ -727,7 +719,7 @@ pub fn video_decoder_split(
             };
 
             let frame_result_callback = Arc::new(frame_result_callback);
-            let max_queued_frames = (2. * config.max_buffering_frames).ceil() as usize;
+            let max_queued_frames = 16;
 
             let mut decoder_loop = DecoderLoop {
                 decoder,
@@ -740,7 +732,6 @@ pub fn video_decoder_split(
                 timestamps: VecDeque::new(),
                 next_pts: 1,
                 converter: RgbaConverter::new(),
-                // 2x: keep the target buffering in the middle of the max amount of queuable frames
                 max_queued_frames,
                 consecutive_errors: 0,
             };
@@ -769,8 +760,6 @@ pub fn video_decoder_split(
         decoder_thread: Some(decoder_thread),
         frame_queue,
         current_frame: None,
-        config,
-        buffering_running_average: 0.0,
     };
 
     Ok((sink, source))
