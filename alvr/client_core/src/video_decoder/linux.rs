@@ -141,7 +141,9 @@ impl VideoDecoderSource {
         self.buffering_running_average = self.buffering_running_average
             * self.config.buffering_history_weight
             + frame_queue_lock.len() as f32 * (1. - self.config.buffering_history_weight);
-        if self.buffering_running_average > self.config.max_buffering_frames {
+        if self.buffering_running_average > self.config.max_buffering_frames
+            && frame_queue_lock.len() > 1
+        {
             frame_queue_lock.pop_front();
         }
 

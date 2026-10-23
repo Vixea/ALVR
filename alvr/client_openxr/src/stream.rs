@@ -442,10 +442,15 @@ impl StreamContext {
             Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)))
         };
 
+        let has_valid_frame = self.last_good_video_frame_metadata.view_params[0].fov
+            != alvr_common::Fov::DUMMY;
+
         // (shinyquagsire23) I don't entirely trust runtimes to implement CompositionLayerProjectionView
         // correctly, but if we do trust them, avoid doing rotation ourselves. Otherwise, rerender.
         // Ex: YVR/PFDMR has issues with aspect ratio mismatches and passthrough compositing.
-        if self.use_custom_reprojection {
+        // Also perform custom reprojection when the current frame was dropped (buffer_ptr is null),
+        // reprojecting the last good frame to the current headset pose instead of showing black.
+        if self.use_custom_reprojection || (buffer_ptr.is_null() && has_valid_frame) {
             output_view_params = [
                 ViewParams {
                     pose: crate::from_xr_pose(current_headset_views[0].pose),
