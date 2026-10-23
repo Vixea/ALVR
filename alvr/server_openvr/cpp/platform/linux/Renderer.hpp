@@ -65,6 +65,7 @@ struct RendererCreateInfo {
     vk::Format format;
     vk::Extent2D inputEyeExtent;
     vk::Extent2D outputExtent;
+    HandleType handleType = HandleType::None;
 };
 
 // One eye of a submitted layer: SteamVR's texture by its shared handle, the

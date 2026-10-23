@@ -135,12 +135,16 @@ int64_t last_known_bitrate_bps = 0;
 
 alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
     alvr::HWContext& vk_ctx,
+    VkContext& v_ctx,
     std::string devicePath,
     alvr::Vendor vendor,
-    VkFrame& input_frame,
+    const render::Output& output,
     uint32_t width,
     uint32_t height
 ) {
+    input_frame = std::make_unique<VkFrame>(
+        v_ctx, output.image.image, output.imageCI, output.size, output.image.memory, output.drm
+    );
     /* VAAPI Encoding pipeline
      * The encoding pipeline has 3 frame types:
      * - input vulkan frames, only used to initialize the mapped frames
@@ -297,9 +301,9 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
 
     auto frames_ctx = (AVHWFramesContext*)(hw_frames_ref->data);
     frames_ctx->format = AV_PIX_FMT_VAAPI;
-    frames_ctx->sw_format = input_frame.avFormat();
-    frames_ctx->width = input_frame.imageInfo().extent.width;
-    frames_ctx->height = input_frame.imageInfo().extent.height;
+    frames_ctx->sw_format = input_frame->avFormat();
+    frames_ctx->width = input_frame->imageInfo().extent.width;
+    frames_ctx->height = input_frame->imageInfo().extent.height;
     frames_ctx->initial_pool_size = 1;
     if ((err = av_hwframe_ctx_init(hw_frames_ref)) < 0) {
         av_buffer_unref(&hw_frames_ref);
@@ -314,7 +318,7 @@ alvr::EncodePipelineVAAPI::EncodePipelineVAAPI(
         mapped_frame = import_frame(hw_frames_ref, drm);
         // r->ImportOutput(drm);
     } else {
-        mapped_frame = map_frame(hw_frames_ref, drm_ctx, input_frame);
+        mapped_frame = map_frame(hw_frames_ref, drm_ctx, *input_frame);
         // std::cout << "mapped frame" << std::endl;
     }
 

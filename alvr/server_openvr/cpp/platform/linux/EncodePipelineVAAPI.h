@@ -1,15 +1,17 @@
 #pragma once
 
 #include "EncodePipeline.h"
+#include "Renderer.hpp"
+#include "VkContext.hpp"
 #include "ffmpeg_helper.h"
+#include <memory>
+#include <string>
 
 extern "C" struct AVBufferRef;
 extern "C" struct AVCodecContext;
 extern "C" struct AVFilterContext;
 extern "C" struct AVFilterGraph;
 extern "C" struct AVFrame;
-
-class Renderer;
 
 namespace alvr {
 
@@ -21,12 +23,13 @@ enum EncoderQualityPreset { QUALITY = 0, BALANCED = 1, SPEED = 2 };
 
 class EncodePipelineVAAPI : public EncodePipeline {
 public:
-    ~EncodePipelineVAAPI();
+    ~EncodePipelineVAAPI() override;
     EncodePipelineVAAPI(
         HWContext& vk_ctx,
+        VkContext& v_ctx,
         std::string devicePath,
         alvr::Vendor vendor,
-        VkFrame& input_frame,
+        const render::Output& output,
         uint32_t width,
         uint32_t height
     );
@@ -37,6 +40,7 @@ public:
     void SetParams(FfiDynamicEncoderParams params) override;
 
 private:
+    std::unique_ptr<VkFrame> input_frame;
     AVBufferRef* hw_ctx = nullptr;
     AVBufferRef* drm_ctx = nullptr;
     AVFrame* mapped_frame = nullptr;
@@ -56,5 +60,5 @@ private:
         };
     };
 };
-;
-}
+
+} // namespace alvr

@@ -74,17 +74,24 @@ int64_t last_known_bitrate_bps = 0;
 
 } // namespace
 alvr::EncodePipelineNvEnc::EncodePipelineNvEnc(
-    HWContext& vk_ctx, VkContext& v_ctx, VkFrame& input_frame, uint32_t width, uint32_t height
+    HWContext& vk_ctx,
+    VkContext& v_ctx,
+    const render::Output& output,
+    uint32_t width,
+    uint32_t height
 )
     : v_ctx(v_ctx)
-    , frame_ctx(vk_ctx.avCtx, input_frame.imageInfo()) {
+    , input_frame(std::make_unique<VkFrame>(
+          v_ctx, output.image.image, output.imageCI, output.size, output.image.memory, output.drm
+      ))
+    , frame_ctx(vk_ctx.avCtx, input_frame->imageInfo()) {
     // The surface format has to follow the output image's channel order. A
     // mismatch still encodes successfully, with red and blue swapped.
     auto input_frame_ctx = (AVHWFramesContext*)frame_ctx.ctx->data;
     auto surface_format = nvenc_surface_format(input_frame_ctx->sw_format);
 
     int err;
-    vk_frame = input_frame.make_av_frame(frame_ctx);
+    vk_frame = input_frame->make_av_frame(frame_ctx);
 
     err = av_hwdevice_ctx_create_derived(&hw_ctx, AV_HWDEVICE_TYPE_CUDA, vk_ctx.avCtx, 0);
     if (err < 0) {

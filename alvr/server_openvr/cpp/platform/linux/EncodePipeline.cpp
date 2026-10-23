@@ -22,11 +22,11 @@ void alvr::EncodePipeline::SetParams(FfiDynamicEncoderParams params) {
     }
 }
 
-std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
+std::unique_ptr<alvr::IVideoEncoder> alvr::EncodePipeline::Create(
     alvr::VkContext& vk_ctx,
-    std::string devicePath,
-    VkFrame& input_frame,
-    /* VkFrameCtx &vk_frame_ctx,  */ uint32_t width,
+    const std::string& devicePath,
+    const render::Output& output,
+    uint32_t width,
     uint32_t height
 ) {
     using alvr::Vendor;
@@ -35,7 +35,7 @@ std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
         if (vk_ctx.meta.vendor == Vendor::Nvidia) {
             try {
                 auto nvenc = std::make_unique<alvr::EncodePipelineNvEnc>(
-                    hwCtx, vk_ctx, input_frame, width, height
+                    hwCtx, vk_ctx, output, width, height
                 );
                 Info("Using NvEnc encoder");
                 return nvenc;
@@ -49,7 +49,7 @@ std::unique_ptr<alvr::EncodePipeline> alvr::EncodePipeline::Create(
         } else {
             try {
                 auto vaapi = std::make_unique<alvr::EncodePipelineVAAPI>(
-                    hwCtx, devicePath, vk_ctx.meta.vendor, input_frame, width, height
+                    hwCtx, vk_ctx, devicePath, vk_ctx.meta.vendor, output, width, height
                 );
                 Info("Using VAAPI encoder");
                 return vaapi;
@@ -91,4 +91,4 @@ bool alvr::EncodePipeline::GetEncoded(FramePacket& packet) {
     return true;
 }
 
-int alvr::EncodePipeline::GetCodec() { return Settings_Instance()->m_codec; }
+int alvr::EncodePipeline::GetCodec() const { return Settings_Instance()->m_codec; }

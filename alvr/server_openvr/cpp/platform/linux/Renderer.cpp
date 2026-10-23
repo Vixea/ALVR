@@ -495,13 +495,11 @@ Renderer::Renderer(
         img = createImage(vkCtx, stagingImgCI);
     }
 
-    // VAAPI imports through DRM-PRIME and wants a dma-buf; NvEnc imports
-    // through CUDA interop and wants an opaque fd.
     output = createOutputImage(
         vkCtx,
         createInfo.outputExtent,
         stagingImgCI.format,
-        vkCtx.meta.vendor == Vendor::Nvidia ? HandleType::OpaqueFd : HandleType::DmaBuf
+        createInfo.handleType
     );
 
     vk::QueryPoolCreateInfo poolCI {

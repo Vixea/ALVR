@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include "EncodePipeline.h"
+#include "IVideoEncoder.h"
 #include "Renderer.hpp"
 
 #include "alvr_server/IDRScheduler.h"
@@ -105,8 +105,7 @@ class Encoder {
 
     Optional<render::Renderer> renderer;
 
-    std::unique_ptr<EncodePipeline> encoder;
-    std::unique_ptr<VkFrame> frame;
+    std::unique_ptr<IVideoEncoder> encoder;
     bool encoderMissingLogged = false;
     IDRScheduler idrScheduler;
 
@@ -164,6 +163,11 @@ public:
         }
 
         outExtent = rendererCI.outputExtent;
+
+        rendererCI.handleType = (vkCtx.meta.vendor == Vendor::Nvidia)
+            ? render::HandleType::OpaqueFd
+            : render::HandleType::DmaBuf;
+
         renderer.emplace(vkCtx, rendererCI, pipeCIs);
     }
 
@@ -207,14 +211,9 @@ public:
 
         auto out = renderer.get().getOutput();
 
-        // TODO: Fix Nvidia
-
-        frame = std::make_unique<VkFrame>(
-            vkCtx, out.image.image, out.imageCI, out.size, out.image.memory, out.drm
+        encoder = IVideoEncoder::Create(
+            vkCtx, devicePath, out, outExtent.width, outExtent.height
         );
-
-        encoder
-            = EncodePipeline::Create(vkCtx, devicePath, *frame, outExtent.width, outExtent.height);
         if (!encoder) {
             throw std::runtime_error("no usable encoder for the current settings");
         }
@@ -224,17 +223,15 @@ public:
     }
 
     // Tears down the encode pipeline so the next createImages + initEncoding
-    // rebuilds from current settings. The pipeline references the frame, so
-    // destroy it first. Only call this from the thread that runs present().
+    // rebuilds from current settings. Only call this from the thread that runs present().
     void shutdown() {
-        // Drain the queue before releasing the frame. Nothing on the VAAPI
+        // Drain the queue before releasing the encoder. Nothing on the VAAPI
         // path leaves Vulkan work in flight, but the Nvidia path signals the
         // frame's semaphore from a queue submission and will need this when
         // it comes back.
         vkCtx.dev.waitIdle();
 
         encoder.reset();
-        frame.reset();
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
             renderer.reset();
@@ -379,10 +376,9 @@ private:
 public:
     ~Encoder() {
         // The device dies in this body, but members are destroyed after the
-        // body runs. Release the pipeline and the frame first so ~VkFrame
-        // does not destroy its semaphore on a dead device.
+        // body runs. Release the pipeline first so it does not destroy
+        // resources on a dead device.
         encoder.reset();
-        frame.reset();
 
         if (renderer.hasValue()) {
             renderer.get().destroy(vkCtx);
