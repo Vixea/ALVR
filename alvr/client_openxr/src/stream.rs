@@ -217,6 +217,8 @@ impl StreamContext {
             core_ctx.platform() != Platform::SamsungGalaxyXR && !config.enable_hdr,
             config.encoding_gamma,
             config.upscaling.clone(),
+            config.max_buffering_frames,
+            config.buffering_history_weight,
         );
 
         {
@@ -367,16 +369,29 @@ impl StreamContext {
             + Duration::from_secs_f32(
                 frame_interval.as_secs_f32() * DECODER_MAX_TIMEOUT_MULTIPLIER,
             );
-        let mut frame_result = None;
+
         if let Some((_, source)) = &mut self.decoder {
-            while frame_result.is_none() && Instant::now() < frame_poll_deadline {
-                frame_result = source.get_frame();
+            // Drain any pending decoded frames from the decoder into the graphics swapchain
+            while let Some((timestamp, buffer_ptr)) = source.get_frame() {
+                self.renderer.ingest_frame(timestamp, buffer_ptr);
+                source.release_frame();
+            }
+
+            // If the graphics swapchain has no frames queued, wait up to deadline for one
+            while self.renderer.is_queue_empty() && Instant::now() < frame_poll_deadline {
+                if let Some((timestamp, buffer_ptr)) = source.get_frame() {
+                    self.renderer.ingest_frame(timestamp, buffer_ptr);
+                    source.release_frame();
+                    break;
+                }
                 thread::sleep(Duration::from_micros(500));
             }
         }
 
-        let (timestamp, frame_metadata, buffer_ptr) =
-            if let Some((timestamp, buffer_ptr)) = frame_result {
+        let new_frame_timestamp = self.renderer.acquire_frame_for_presentation();
+
+        let (timestamp, frame_metadata, has_new_frame) =
+            if let Some(timestamp) = new_frame_timestamp {
                 if let Some(metadata) = self.core_context.report_compositor_start(timestamp) {
                     self.last_good_video_frame_metadata = VideoFrameMetadata {
                         foveation_center_shifts: metadata
@@ -387,12 +402,12 @@ impl StreamContext {
                 }
 
                 // Keep displaying new images even when their metadata is unavailable.
-                (timestamp, self.last_good_video_frame_metadata, buffer_ptr)
+                (timestamp, self.last_good_video_frame_metadata, true)
             } else {
                 (
                     vsync_time,
                     self.last_good_video_frame_metadata,
-                    ptr::null_mut(),
+                    false,
                 )
             };
         let view_params = frame_metadata.view_params;
@@ -448,9 +463,9 @@ impl StreamContext {
         // (shinyquagsire23) I don't entirely trust runtimes to implement CompositionLayerProjectionView
         // correctly, but if we do trust them, avoid doing rotation ourselves. Otherwise, rerender.
         // Ex: YVR/PFDMR has issues with aspect ratio mismatches and passthrough compositing.
-        // Also perform custom reprojection when the current frame was dropped (buffer_ptr is null),
-        // reprojecting the last good frame to the current headset pose instead of showing black.
-        if self.use_custom_reprojection || (buffer_ptr.is_null() && has_valid_frame) {
+        // Also perform custom reprojection when no new frame arrived this vsync,
+        // reprojecting the last good frame from the staging swapchain to the current headset pose instead of showing black.
+        if self.use_custom_reprojection || (!has_new_frame && has_valid_frame) {
             output_view_params = [
                 ViewParams {
                     pose: crate::from_xr_pose(current_headset_views[0].pose),
@@ -466,7 +481,7 @@ impl StreamContext {
         }
 
         self.renderer.render(
-            buffer_ptr,
+            ptr::null_mut(),
             [
                 StreamViewParams {
                     swapchain_index: left_swapchain_idx,
@@ -488,7 +503,7 @@ impl StreamContext {
         self.swapchains[0].release_image().unwrap();
         self.swapchains[1].release_image().unwrap();
 
-        if !buffer_ptr.is_null()
+        if has_new_frame
             && let Some(xr_now) = crate::xr_runtime_now(self.xr_session.instance())
         {
             self.core_context.report_submit(

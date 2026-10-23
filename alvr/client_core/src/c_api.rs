@@ -727,6 +727,8 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         false, // TODO: limited range fix config
         1.0,   // TODO: encoding gamma config
         upscaling,
+        1.0,
+        0.9,
     )));
 }
 
@@ -789,7 +791,7 @@ pub extern "C" fn alvr_render_stream_opengl(
     view_params: *const AlvrStreamViewParams,
     foveation_center_shifts: *const [[f32; 2]; 2],
 ) {
-    STREAM_RENDERER.with_borrow(|renderer| {
+    STREAM_RENDERER.with_borrow_mut(|renderer| {
         if let Some(renderer) = renderer {
             let left_params = unsafe { &*view_params };
             let right_params = unsafe { &*view_params.offset(1) };

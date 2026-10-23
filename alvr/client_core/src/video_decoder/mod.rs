@@ -55,6 +55,14 @@ impl VideoDecoderSource {
         #[cfg(not(any(target_os = "android", target_os = "linux")))]
         None
     }
+
+    /// Releases the current native frame handle immediately back to the decoder hardware buffer pool.
+    pub fn release_frame(&mut self) {
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        {
+            self.inner.release_frame();
+        }
+    }
 }
 
 // report_frame_decoded: (target_timestamp: Duration) -> ()

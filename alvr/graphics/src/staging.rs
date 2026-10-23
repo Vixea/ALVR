@@ -53,7 +53,6 @@ pub struct StagingRenderer {
     program: gl::Program,
     view_idx_uloc: gl::UniformLocation,
     surface_texture: gl::Texture,
-    framebuffers: [gl::Framebuffer; 2],
     viewport_size: IVec2,
 
     // CPU frame upload path (software decoding fallback)
@@ -70,7 +69,6 @@ pub struct StagingRenderer {
 impl StagingRenderer {
     pub fn new(
         context: Rc<GraphicsContext>,
-        staging_textures: [gl::Texture; 2],
         view_resolution: UVec2,
         fix_limited_range: bool,
     ) -> Self {
@@ -104,23 +102,6 @@ impl StagingRenderer {
         unsafe {
             // This is an external surface and storage should not be initialized
             let surface_texture = ck!(gl.create_texture().unwrap());
-
-            let mut framebuffers = vec![];
-            for tex in staging_textures {
-                let framebuffer = ck!(gl.create_framebuffer().unwrap());
-                ck!(gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer)));
-                ck!(gl.framebuffer_texture_2d(
-                    gl::DRAW_FRAMEBUFFER,
-                    gl::COLOR_ATTACHMENT0,
-                    gl::TEXTURE_2D,
-                    Some(tex),
-                    0,
-                ));
-
-                framebuffers.push(framebuffer);
-            }
-
-            ck!(gl.bind_framebuffer(gl::FRAMEBUFFER, None));
 
             let view_idx_uloc = ck!(gl.get_uniform_location(program, "view_idx")).unwrap();
 
@@ -160,7 +141,6 @@ impl StagingRenderer {
                 program,
                 surface_texture,
                 view_idx_uloc,
-                framebuffers: framebuffers.try_into().unwrap(),
                 viewport_size: view_resolution.as_ivec2(),
                 #[cfg(target_os = "linux")]
                 program_2d,
@@ -174,9 +154,36 @@ impl StagingRenderer {
         }
     }
 
+    pub fn create_framebuffers(&self, staging_textures: &[gl::Texture; 2]) -> [gl::Framebuffer; 2] {
+        let gl = &self.context.gl_context;
+        self.context.make_current();
+
+        unsafe {
+            let mut framebuffers = vec![];
+            for &tex in staging_textures {
+                let framebuffer = ck!(gl.create_framebuffer().unwrap());
+                ck!(gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(framebuffer)));
+                ck!(gl.framebuffer_texture_2d(
+                    gl::DRAW_FRAMEBUFFER,
+                    gl::COLOR_ATTACHMENT0,
+                    gl::TEXTURE_2D,
+                    Some(tex),
+                    0,
+                ));
+
+                framebuffers.push(framebuffer);
+            }
+
+            ck!(gl.bind_framebuffer(gl::FRAMEBUFFER, None));
+
+            framebuffers.try_into().unwrap()
+        }
+    }
+
     // Draw the bound source texture into both per-eye staging framebuffers
     fn draw_views(
         &self,
+        framebuffers: &[gl::Framebuffer; 2],
         program: gl::Program,
         view_idx_uloc: &gl::UniformLocation,
         texture_target: u32,
@@ -191,7 +198,7 @@ impl StagingRenderer {
             ck!(gl.disable(gl::SCISSOR_TEST));
             ck!(gl.disable(gl::STENCIL_TEST));
 
-            for (i, framebuffer) in self.framebuffers.iter().enumerate() {
+            for (i, framebuffer) in framebuffers.iter().enumerate() {
                 ck!(gl.bind_framebuffer(gl::DRAW_FRAMEBUFFER, Some(*framebuffer)));
 
                 ck!(gl.active_texture(gl::TEXTURE0));
@@ -207,7 +214,7 @@ impl StagingRenderer {
     /// On Android, `hardware_buffer` must be a valid AHardwareBuffer. On Linux, it must point to a
     /// valid `LinuxVideoFrame`.
     #[allow(unused_variables)]
-    pub fn render(&self, hardware_buffer: *mut c_void) {
+    pub fn render(&self, framebuffers: &[gl::Framebuffer; 2], hardware_buffer: *mut c_void) {
         self.context.make_current();
 
         #[cfg(target_os = "linux")]
@@ -221,6 +228,7 @@ impl StagingRenderer {
                     self.context
                         .render_dmabuf_using_texture(image, self.surface_texture, || {
                             self.draw_views(
+                                framebuffers,
                                 self.program,
                                 &self.view_idx_uloc,
                                 GL_TEXTURE_EXTERNAL_OES,
@@ -235,6 +243,7 @@ impl StagingRenderer {
                 } => {
                     self.upload_rgba(*width as i32, *height as i32, data);
                     self.draw_views(
+                        framebuffers,
                         self.program_2d,
                         &self.view_idx_uloc_2d,
                         gl::TEXTURE_2D,
@@ -251,6 +260,7 @@ impl StagingRenderer {
                 self.surface_texture,
                 || {
                     self.draw_views(
+                        framebuffers,
                         self.program,
                         &self.view_idx_uloc,
                         GL_TEXTURE_EXTERNAL_OES,
@@ -314,9 +324,6 @@ impl Drop for StagingRenderer {
         unsafe {
             ck!(gl.delete_program(self.program));
             ck!(gl.delete_texture(self.surface_texture));
-            for framebuffer in &self.framebuffers {
-                ck!(gl.delete_framebuffer(*framebuffer));
-            }
 
             #[cfg(target_os = "linux")]
             {

@@ -90,14 +90,13 @@ pub struct VideoDecoderSource {
     running: Arc<RelaxedAtomic>,
     dequeue_thread: Option<JoinHandle<()>>,
     image_queue: Arc<Mutex<VecDeque<QueuedImage>>>,
-    config: VideoDecoderConfig,
-    buffering_running_average: f32,
 }
 
 unsafe impl Send for VideoDecoderSource {}
 
 impl VideoDecoderSource {
     // The application MUST finish using the returned buffer before calling this function again
+    // or call release_frame() immediately.
     pub fn dequeue_frame(&mut self) -> Option<(Duration, *mut c_void)> {
         let mut image_queue_lock = self.image_queue.lock();
 
@@ -105,14 +104,6 @@ impl VideoDecoderSource {
             && queued_image.in_use
         {
             // image is released and ready to be reused by the decoder
-            image_queue_lock.pop_front();
-        }
-
-        // use running average to give more weight to recent samples
-        self.buffering_running_average = self.buffering_running_average
-            * self.config.buffering_history_weight
-            + image_queue_lock.len() as f32 * (1. - self.config.buffering_history_weight);
-        if self.buffering_running_average > self.config.max_buffering_frames as f32 {
             image_queue_lock.pop_front();
         }
 
@@ -129,9 +120,16 @@ impl VideoDecoderSource {
                     .cast(),
             ))
         } else {
-            // TODO: add back when implementing proper phase sync
-            //warn!("Video frame queue underflow!");
             None
+        }
+    }
+
+    pub fn release_frame(&mut self) {
+        let mut image_queue_lock = self.image_queue.lock();
+        if let Some(queued_image) = image_queue_lock.front()
+            && queued_image.in_use
+        {
+            image_queue_lock.pop_front();
         }
     }
 }
@@ -200,15 +198,12 @@ fn decoder_lifecycle(
     image_queue: Arc<Mutex<VecDeque<QueuedImage>>>,
     image_reader: &mut ImageReader,
 ) -> Result<()> {
-    // 2x: keep the target buffering in the middle of the max amount of queuable frames
-    let available_buffering_frames = (2. * config.max_buffering_frames).ceil() as usize;
-
     image_reader.set_image_listener(Box::new({
         let image_queue = Arc::clone(&image_queue);
         move |image_reader| {
             let mut image_queue_lock = image_queue.lock();
 
-            if image_queue_lock.len() > available_buffering_frames {
+            if image_queue_lock.len() >= 10 {
                 warn!("Video frame queue overflow!");
                 image_queue_lock.pop_front();
             }
@@ -418,8 +413,6 @@ pub fn video_decoder_split(
         running,
         dequeue_thread: Some(dequeue_thread),
         image_queue,
-        config,
-        buffering_running_average: 0.0,
     };
 
     Ok((sink, source))

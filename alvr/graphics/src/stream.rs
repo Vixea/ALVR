@@ -1,19 +1,20 @@
-use super::{GraphicsContext, MAX_PUSH_CONSTANTS_SIZE, staging::StagingRenderer};
+use super::{GraphicsContext, MAX_PUSH_CONSTANTS_SIZE, ck, staging::StagingRenderer};
 use alvr_common::{
     AlvrFoveatedEncodingParams, ViewParams,
     glam::{Mat4, UVec2, Vec2, Vec3, Vec4},
 };
 use alvr_session::{PassthroughMode, UpscalingConfig};
-use std::{cell::Cell, ffi::c_void, iter, mem, rc::Rc};
+use glow::{self as gl, HasContext};
+use std::{cell::Cell, collections::VecDeque, ffi::c_void, iter, mem, rc::Rc, time::Duration};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType,
     BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites, FragmentState, LoadOp,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
     PushConstantRange, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp,
-    TextureSampleType, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
-    include_wgsl,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp,
+    Texture, TextureFormat, TextureSampleType, TextureView, TextureViewDescriptor,
+    TextureViewDimension, VertexState, include_wgsl,
 };
 
 const FLOAT_SIZE: u32 = mem::size_of::<f32>() as u32;
@@ -43,20 +44,44 @@ pub struct StreamViewParams {
     pub output_view_params: ViewParams,
 }
 
-#[derive(Debug)]
-struct ViewObjects {
-    bind_group: BindGroup,
-    render_target: Vec<TextureView>,
+pub struct StagingSlot {
+    pub textures: [Texture; 2],
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    pub textures_gl: [gl::Texture; 2],
+    pub framebuffers: [gl::Framebuffer; 2],
+    pub bind_groups: [BindGroup; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct QueuedFrame {
+    pub slot_idx: usize,
+    pub timestamp: Duration,
 }
 
 pub struct StreamRenderer {
     context: Rc<GraphicsContext>,
     staging_renderer: StagingRenderer,
     pipeline: RenderPipeline,
-    views_objects: [ViewObjects; 2],
+    render_targets: [Vec<TextureView>; 2],
     foveated_encoding: Option<AlvrFoveatedEncodingParams>,
     foveation_buffer: Buffer,
     last_foveation_center_shifts: Cell<Option<[Vec2; 2]>>,
+
+    // Growable staging swapchain
+    staging_resolution: UVec2,
+    target_format: TextureFormat,
+    bind_group_layout: BindGroupLayout,
+    sampler: Sampler,
+    staging_slots: Vec<StagingSlot>,
+    free_slots: Vec<usize>,
+    max_staging_slots: usize,
+    ready_frames: VecDeque<QueuedFrame>,
+    current_slot: Option<usize>,
+
+    // Buffering control
+    max_buffering_frames: f32,
+    buffering_history_weight: f32,
+    buffering_running_average: f32,
 }
 
 impl StreamRenderer {
@@ -73,6 +98,8 @@ impl StreamRenderer {
         fix_limited_range: bool,
         encoding_gamma: f32,
         upscaling: Option<UpscalingConfig>,
+        max_buffering_frames: f32,
+        buffering_history_weight: f32,
     ) -> Self {
         let device = &context.device;
 
@@ -214,14 +241,86 @@ impl StreamRenderer {
             ..Default::default()
         });
 
-        let mut view_objects = vec![];
-        let mut staging_textures_gl = vec![];
+        let mut render_targets = vec![];
         for target_swapchain in &swapchain_textures {
+            let render_target = super::create_gl_swapchain(
+                device,
+                target_swapchain,
+                target_view_resolution,
+                target_format,
+            );
+            render_targets.push(render_target);
+        }
+
+        let staging_renderer = StagingRenderer::new(
+            Rc::clone(&context),
+            staging_resolution,
+            fix_limited_range,
+        );
+
+        // Growable swapchain starts with 2 slots (steady-state ping-pong without wasting VRAM).
+        // It grows on-demand when bursts or jitter deliver multiple frames before vsync,
+        // allowing hardware decoder buffers (DMA-BUFs / AHardwareBuffers) to be ingested and freed
+        // immediately without dropping frames or stalling the decoder.
+        let initial_slots = 2;
+        let max_staging_slots = (max_buffering_frames.ceil() as usize * 2 + 2).clamp(4, 16);
+        let mut staging_slots = Vec::with_capacity(max_staging_slots);
+        for _ in 0..initial_slots {
+            staging_slots.push(Self::create_staging_slot(
+                &staging_renderer,
+                device,
+                &bind_group_layout,
+                &sampler,
+                &foveation_buffer,
+                staging_resolution,
+                target_format,
+            ));
+        }
+        let free_slots = (0..initial_slots).collect();
+
+        Self {
+            context,
+            staging_renderer,
+            pipeline,
+            render_targets: render_targets.try_into().unwrap(),
+            foveated_encoding,
+            foveation_buffer,
+            last_foveation_center_shifts: Cell::new(None),
+            staging_resolution,
+            target_format,
+            bind_group_layout,
+            sampler,
+            staging_slots,
+            free_slots,
+            max_staging_slots,
+            ready_frames: VecDeque::new(),
+            current_slot: None,
+            max_buffering_frames,
+            buffering_history_weight,
+            buffering_running_average: 0.0,
+        }
+    }
+
+    fn create_staging_slot(
+        staging_renderer: &StagingRenderer,
+        device: &wgpu::Device,
+        bind_group_layout: &BindGroupLayout,
+        sampler: &Sampler,
+        foveation_buffer: &Buffer,
+        staging_resolution: UVec2,
+        target_format: TextureFormat,
+    ) -> StagingSlot {
+        let mut textures = vec![];
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let mut textures_gl = vec![];
+        let mut bind_groups = vec![];
+
+        for _ in 0..2 {
             let staging_texture = super::create_texture(device, staging_resolution, target_format);
 
             let bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: None,
-                layout: &bind_group_layout,
+                layout: bind_group_layout,
                 entries: &[
                     BindGroupEntry {
                         binding: 0,
@@ -231,7 +330,7 @@ impl StreamRenderer {
                     },
                     BindGroupEntry {
                         binding: 1,
-                        resource: BindingResource::Sampler(&sampler),
+                        resource: BindingResource::Sampler(sampler),
                     },
                     BindGroupEntry {
                         binding: 2,
@@ -240,66 +339,161 @@ impl StreamRenderer {
                 ],
             });
 
-            let render_target = super::create_gl_swapchain(
-                device,
-                target_swapchain,
-                target_view_resolution,
-                target_format,
-            );
-
-            view_objects.push(ViewObjects {
-                bind_group,
-                render_target,
-            });
-
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-            {
-                let staging_texture_gl = unsafe {
-                    staging_texture.as_hal::<wgpu::hal::api::Gles, _, _>(|tex| {
-                        let wgpu::hal::gles::TextureInner::Texture { raw, .. } = tex.unwrap().inner
-                        else {
-                            panic!("invalid texture type");
-                        };
-                        raw
-                    })
-                };
-                staging_textures_gl.push(staging_texture_gl);
+            let staging_texture_gl = unsafe {
+                staging_texture.as_hal::<wgpu::hal::api::Gles, _, _>(|tex| {
+                    let wgpu::hal::gles::TextureInner::Texture { raw, .. } = tex.unwrap().inner
+                    else {
+                        panic!("invalid texture type");
+                    };
+                    raw
+                })
+            };
+
+            textures.push(staging_texture);
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            textures_gl.push(staging_texture_gl);
+            bind_groups.push(bind_group);
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let textures_gl: [gl::Texture; 2] = textures_gl.try_into().unwrap();
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let framebuffers = staging_renderer.create_framebuffers(&textures_gl);
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        let framebuffers = [glow::NativeFramebuffer(0), glow::NativeFramebuffer(0)];
+
+        StagingSlot {
+            textures: textures.try_into().unwrap(),
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            textures_gl,
+            framebuffers,
+            bind_groups: bind_groups.try_into().unwrap(),
+        }
+    }
+
+    /// Ingests a decoded hardware frame into a staging texture in the growable swapchain,
+    /// enabling the caller to immediately release the hardware decoder buffer.
+    pub fn ingest_frame(&mut self, timestamp: Duration, hardware_buffer: *mut c_void) {
+        if hardware_buffer.is_null() {
+            return;
+        }
+
+        let slot_idx = if let Some(idx) = self.free_slots.pop() {
+            idx
+        } else if self.staging_slots.len() < self.max_staging_slots {
+            let new_slot = Self::create_staging_slot(
+                &self.staging_renderer,
+                &self.context.device,
+                &self.bind_group_layout,
+                &self.sampler,
+                &self.foveation_buffer,
+                self.staging_resolution,
+                self.target_format,
+            );
+            let idx = self.staging_slots.len();
+            self.staging_slots.push(new_slot);
+            alvr_common::info!(
+                "Growing graphics staging swapchain to {} slots",
+                self.staging_slots.len()
+            );
+            idx
+        } else {
+            // Swapchain is at max capacity: drop oldest buffered frame
+            if let Some(oldest) = self.ready_frames.pop_front() {
+                alvr_common::warn!(
+                    "Graphics staging swapchain full ({}), dropping oldest buffered frame at {:?}",
+                    self.max_staging_slots,
+                    oldest.timestamp
+                );
+                oldest.slot_idx
+            } else if let Some(curr) = self.current_slot {
+                curr
+            } else {
+                return;
+            }
+        };
+
+        // Render hardware buffer into the acquired slot's framebuffers
+        self.staging_renderer
+            .render(&self.staging_slots[slot_idx].framebuffers, hardware_buffer);
+
+        self.ready_frames.push_back(QueuedFrame {
+            slot_idx,
+            timestamp,
+        });
+    }
+
+    /// Selects the next frame to present according to the buffering policy, retiring the previously
+    /// presented slot back to the free pool. Returns the presentation timestamp if a new frame is ready.
+    pub fn acquire_frame_for_presentation(&mut self) -> Option<Duration> {
+        if self.ready_frames.is_empty() {
+            return None;
+        }
+
+        // Update running average of queue length
+        self.buffering_running_average = self.buffering_running_average
+            * self.buffering_history_weight
+            + self.ready_frames.len() as f32 * (1. - self.buffering_history_weight);
+
+        // Drop frames if running average exceeds max_buffering_frames
+        while self.buffering_running_average > self.max_buffering_frames
+            && self.ready_frames.len() > 1
+        {
+            if let Some(dropped) = self.ready_frames.pop_front() {
+                self.free_slots.push(dropped.slot_idx);
             }
         }
 
-        let staging_renderer = StagingRenderer::new(
-            Rc::clone(&context),
-            staging_textures_gl.try_into().unwrap(),
-            staging_resolution,
-            fix_limited_range,
-        );
+        let frame = self.ready_frames.pop_front()?;
+        if let Some(prev_idx) = self.current_slot.replace(frame.slot_idx) {
+            if prev_idx != frame.slot_idx {
+                self.free_slots.push(prev_idx);
+            }
+        }
 
-        Self {
-            context,
-            staging_renderer,
-            pipeline,
-            views_objects: view_objects.try_into().unwrap(),
-            foveated_encoding,
-            foveation_buffer,
-            last_foveation_center_shifts: Cell::new(None),
+        Some(frame.timestamp)
+    }
+
+    pub fn is_queue_empty(&self) -> bool {
+        self.ready_frames.is_empty()
+    }
+
+    pub fn queued_frame_count(&self) -> usize {
+        self.ready_frames.len()
+    }
+
+    pub fn has_current_frame(&self) -> bool {
+        self.current_slot.is_some()
+    }
+
+    pub fn clear_queue(&mut self) {
+        for frame in self.ready_frames.drain(..) {
+            self.free_slots.push(frame.slot_idx);
         }
     }
 
     /// Runtime foveation centers must already be encoder-aligned. `None` uses the negotiated centers.
     ///
     /// # Safety
-    /// `hardware_buffer` must be a valid pointer to a ANativeWindowBuffer.
+    /// If non-null, `hardware_buffer` must be a valid pointer to a ANativeWindowBuffer (Android)
+    /// or LinuxVideoFrame (Linux).
     pub fn render(
-        &self,
+        &mut self,
         hardware_buffer: *mut c_void,
         view_params: [StreamViewParams; 2],
         passthrough: Option<&PassthroughMode>,
         foveation_center_shifts: Option<[Vec2; 2]>,
     ) {
-        // if hardware_buffer is available copy stream to staging texture
+        // If hardware_buffer is passed directly, ingest and acquire it
         if !hardware_buffer.is_null() {
-            self.staging_renderer.render(hardware_buffer);
+            self.ingest_frame(Duration::ZERO, hardware_buffer);
+            self.acquire_frame_for_presentation();
         }
+
+        let Some(slot_idx) = self.current_slot else {
+            return;
+        };
 
         if let Some(config) = &self.foveated_encoding
             && self.last_foveation_center_shifts.get() != foveation_center_shifts
@@ -325,7 +519,7 @@ impl StreamRenderer {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &self.views_objects[view_idx].render_target
+                    view: &self.render_targets[view_idx]
                         [view_params.swapchain_index as usize],
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -387,12 +581,27 @@ impl StreamRenderer {
                 VIEW_INDEX_CONST_OFFSET,
                 &(view_idx as u32).to_le_bytes(),
             );
-            render_pass.set_bind_group(0, &self.views_objects[view_idx].bind_group, &[]);
+            render_pass.set_bind_group(0, &self.staging_slots[slot_idx].bind_groups[view_idx], &[]);
             set_passthrough_push_constants(&mut render_pass, passthrough);
             render_pass.draw(0..4, 0..1);
         }
 
         self.context.queue.submit(iter::once(encoder.finish()));
+    }
+}
+
+impl Drop for StreamRenderer {
+    fn drop(&mut self) {
+        let gl = &self.context.gl_context;
+        self.context.make_current();
+
+        unsafe {
+            for slot in &self.staging_slots {
+                for fb in slot.framebuffers {
+                    ck!(gl.delete_framebuffer(fb));
+                }
+            }
+        }
     }
 }
 
