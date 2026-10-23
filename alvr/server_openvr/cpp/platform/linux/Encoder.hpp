@@ -324,11 +324,26 @@ public:
         ReportComposed(targetTimestampNs, 0);
 
         encoder->SetParams(GetDynamicEncoderParams());
-        encoder->PushFrame(0, idrScheduler.CheckIDRInsertion());
 
         alvr::FramePacket framePacket;
-        if (!encoder->GetEncoded(framePacket)) {
-            assert(false);
+        auto const& yuvOut = renderer.get().getYuvOutput();
+        if (yuvOut.has_value()) {
+            alvr::VideoFrameSlot slot {
+                .image = yuvOut->image.image,
+                .yuvView = yuvOut->image.view,
+                .yView = yuvOut->yView,
+                .uvView = yuvOut->uvView,
+                .extent = yuvOut->extent,
+                .format = yuvOut->format,
+                .readySemaphore = renderer.get().getRenderFinishedSemaphore(),
+            };
+            if (!encoder->EncodeFrame(slot, 0, idrScheduler.CheckIDRInsertion(), framePacket)) {
+                assert(false);
+            }
+        } else {
+            if (!encoder->EncodeFrame(0, idrScheduler.CheckIDRInsertion(), framePacket)) {
+                assert(false);
+            }
         }
 
         ParseFrameNals(

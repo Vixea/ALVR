@@ -66,6 +66,37 @@ struct RendererCreateInfo {
     vk::Extent2D inputEyeExtent;
     vk::Extent2D outputExtent;
     HandleType handleType = HandleType::None;
+    bool enableYuvOutput = false;
+    bool is10Bit = false;
+};
+
+struct YuvParams {
+    float y_weights[4]; // rgb weights + offset
+    float u_weights[4]; // rgb weights + offset
+    float v_weights[4]; // rgb weights + offset
+    uint32_t extent[2]; // width, height
+    uint32_t _pad[2];   // pad to 64 bytes
+};
+static_assert(sizeof(YuvParams) == 64);
+
+struct YuvImage {
+    Image image;
+    vk::ImageView yView = VK_NULL_HANDLE;
+    vk::ImageView uvView = VK_NULL_HANDLE;
+    vk::Extent2D extent {};
+    vk::Format format = vk::Format::eG8B8R82Plane420Unorm;
+
+    void destroy(VkContext const& ctx) {
+        if (yView) {
+            ctx.dev.destroy(yView);
+            yView = VK_NULL_HANDLE;
+        }
+        if (uvView) {
+            ctx.dev.destroy(uvView);
+            uvView = VK_NULL_HANDLE;
+        }
+        image.destroy(ctx);
+    }
 };
 
 // One eye of a submitted layer: SteamVR's texture by its shared handle, the
@@ -147,6 +178,24 @@ namespace detail {
         void destroy(VkContext const& ctx);
     };
 
+    class YuvPipeline {
+        vk::ShaderModule shader;
+        vk::PipelineLayout pipeLayout;
+        vk::Pipeline pipe;
+        vk::DescriptorSetLayout descLayout;
+
+    public:
+        YuvPipeline(VkContext const& ctx, vk::Sampler sampler);
+        void render(
+            VkContext const& ctx,
+            vk::CommandBuffer cmdBuf,
+            vk::ImageView inRgb,
+            const YuvImage& outYuv,
+            vk::Extent2D extent
+        );
+        void destroy(VkContext const& ctx);
+    };
+
 }
 
 class Renderer {
@@ -155,6 +204,10 @@ class Renderer {
 
     Image stagingImgs[StagingImgCount];
     Output output;
+
+    std::optional<detail::YuvPipeline> yuvPipe;
+    std::optional<YuvImage> yuvOutput;
+    vk::Semaphore renderFinishedSem;
 
     vk::QueryPool timestampPool;
     vk::CommandPool cmdPool;
@@ -203,6 +256,9 @@ public:
     FoveationCenterShifts foveationCenterShifts {};
 
     Output getOutput() { return output; }
+
+    const std::optional<YuvImage>& getYuvOutput() const { return yuvOutput; }
+    vk::Semaphore getRenderFinishedSemaphore() const { return renderFinishedSem; }
 
     void destroy(VkContext const& ctx);
 };

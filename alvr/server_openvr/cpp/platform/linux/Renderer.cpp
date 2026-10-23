@@ -106,6 +106,149 @@ void RenderPipeline::destroy(VkContext const& ctx) {
     ctx.dev.destroy(shader);
 }
 
+YuvPipeline::YuvPipeline(VkContext const& ctx, vk::Sampler sampler) {
+    vk::ShaderModuleCreateInfo shaderCI {
+        .codeSize = RGBTOYUV420_SHADER_COMP_SPV_LEN,
+        .pCode = reinterpret_cast<u32 const*>(RGBTOYUV420_SHADER_COMP_SPV_PTR),
+    };
+    shader = ctx.dev.createShaderModule(shaderCI);
+
+    vk::PushConstantRange pushRange {
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = sizeof(YuvParams),
+    };
+
+    vk::DescriptorSetLayoutBinding descBindings[3];
+    descBindings[0] = {
+        .binding = 0,
+        .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .pImmutableSamplers = &sampler,
+    };
+    descBindings[1] = {
+        .binding = 1,
+        .descriptorType = vk::DescriptorType::eStorageImage,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+    };
+    descBindings[2] = {
+        .binding = 2,
+        .descriptorType = vk::DescriptorType::eStorageImage,
+        .descriptorCount = 1,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+    };
+
+    vk::DescriptorSetLayoutCreateInfo descLayoutCI {
+        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .bindingCount = 3,
+        .pBindings = descBindings,
+    };
+    descLayout = ctx.dev.createDescriptorSetLayout(descLayoutCI);
+
+    vk::PipelineLayoutCreateInfo pipeLayoutCI {
+        .setLayoutCount = 1,
+        .pSetLayouts = &descLayout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &pushRange,
+    };
+    pipeLayout = ctx.dev.createPipelineLayout(pipeLayoutCI);
+
+    vk::PipelineShaderStageCreateInfo stageCI {
+        .stage = vk::ShaderStageFlagBits::eCompute,
+        .module = shader,
+        .pName = "main",
+    };
+    vk::ComputePipelineCreateInfo pipeCI {
+        .stage = stageCI,
+        .layout = pipeLayout,
+    };
+    auto [result, pipes] = ctx.dev.createComputePipelines({}, pipeCI);
+    assert(result == vk::Result::eSuccess);
+    pipe = pipes[0];
+}
+
+void YuvPipeline::render(
+    VkContext const& ctx,
+    vk::CommandBuffer cmdBuf,
+    vk::ImageView inRgb,
+    const YuvImage& outYuv,
+    vk::Extent2D extent
+) {
+    cmdBuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipe);
+
+    YuvParams params {};
+    // BT.709 limited-range weights (studio swing standard for video encoders)
+    params.y_weights[0] = 0.182586f;
+    params.y_weights[1] = 0.614231f;
+    params.y_weights[2] = 0.062007f;
+    params.y_weights[3] = 16.0f / 255.0f;
+
+    params.u_weights[0] = -0.100644f;
+    params.u_weights[1] = -0.338572f;
+    params.u_weights[2] = 0.439216f;
+    params.u_weights[3] = 128.0f / 255.0f;
+
+    params.v_weights[0] = 0.439216f;
+    params.v_weights[1] = -0.398942f;
+    params.v_weights[2] = -0.040274f;
+    params.v_weights[3] = 128.0f / 255.0f;
+
+    params.extent[0] = extent.width;
+    params.extent[1] = extent.height;
+
+    cmdBuf.pushConstants(
+        pipeLayout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(YuvParams), &params
+    );
+
+    vk::DescriptorImageInfo descIn {
+        .imageView = inRgb,
+        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+    };
+    vk::DescriptorImageInfo descY {
+        .imageView = outYuv.yView,
+        .imageLayout = vk::ImageLayout::eGeneral,
+    };
+    vk::DescriptorImageInfo descUV {
+        .imageView = outYuv.uvView,
+        .imageLayout = vk::ImageLayout::eGeneral,
+    };
+
+    vk::WriteDescriptorSet writes[3];
+    writes[0] = {
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+        .pImageInfo = &descIn,
+    };
+    writes[1] = {
+        .dstBinding = 1,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eStorageImage,
+        .pImageInfo = &descY,
+    };
+    writes[2] = {
+        .dstBinding = 2,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eStorageImage,
+        .pImageInfo = &descUV,
+    };
+
+    cmdBuf.pushDescriptorSetKHR(
+        vk::PipelineBindPoint::eCompute, pipeLayout, 0, writes, ctx.dispatch
+    );
+
+    cmdBuf.dispatch((extent.width / 2 + 7) / 8, (extent.height / 2 + 7) / 8, 1);
+}
+
+void YuvPipeline::destroy(VkContext const& ctx) {
+    ctx.dev.destroy(pipe);
+    ctx.dev.destroy(pipeLayout);
+    ctx.dev.destroy(descLayout);
+    ctx.dev.destroy(shader);
+}
+
 }
 
 #ifndef DRM_FORMAT_INVALID
@@ -443,6 +586,116 @@ Output createOutputImage(
     return out;
 }
 
+YuvImage createYuvImage(
+    VkContext const& ctx,
+    vk::Extent2D extent,
+    bool is10Bit
+) {
+    YuvImage yuv;
+    yuv.extent = extent;
+    yuv.format = is10Bit ? vk::Format::eG10X6B10X6R10X62Plane420Unorm3Pack16
+                         : vk::Format::eG8B8R82Plane420Unorm;
+
+    vk::ImageCreateInfo imgCI {
+        .flags = vk::ImageCreateFlagBits::eMutableFormat,
+        .imageType = vk::ImageType::e2D,
+        .format = yuv.format,
+        .extent = {
+            .width = extent.width,
+            .height = extent.height,
+            .depth = 1,
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eStorage
+            | vk::ImageUsageFlagBits::eSampled
+            | vk::ImageUsageFlagBits::eTransferSrc
+            | vk::ImageUsageFlagBits::eTransferDst,
+        .sharingMode = vk::SharingMode::eExclusive,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    };
+
+    yuv.image.image = ctx.dev.createImage(imgCI);
+    yuv.image.layout = imgCI.initialLayout;
+
+    vk::MemoryDedicatedRequirements dedicatedReqs {};
+    vk::MemoryRequirements2 memReqs {
+        .pNext = &dedicatedReqs,
+    };
+    vk::ImageMemoryRequirementsInfo2 memReqInfo {
+        .image = yuv.image.image,
+    };
+    ctx.dev.getImageMemoryRequirements2(&memReqInfo, &memReqs);
+
+    vk::MemoryDedicatedAllocateInfo memDedicatedInfo {
+        .image = yuv.image.image,
+    };
+    vk::MemoryAllocateInfo memAllocInfo {
+        .pNext = &memDedicatedInfo,
+        .allocationSize = memReqs.memoryRequirements.size,
+        .memoryTypeIndex = memoryTypeIndex(
+            ctx, vk::MemoryPropertyFlagBits::eDeviceLocal, memReqs.memoryRequirements.memoryTypeBits
+        ),
+    };
+    yuv.image.memory = ctx.dev.allocateMemory(memAllocInfo);
+
+    vk::BindImageMemoryInfo bindImgInfo {
+        .image = yuv.image.image,
+        .memory = yuv.image.memory,
+        .memoryOffset = 0,
+    };
+    ctx.dev.bindImageMemory2(bindImgInfo);
+
+    // Full 2-plane view
+    vk::ImageViewCreateInfo yuvViewCI {
+        .image = yuv.image.image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = yuv.format,
+        .subresourceRange {
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    yuv.image.view = ctx.dev.createImageView(yuvViewCI);
+
+    // Plane 0 (Y) view
+    vk::ImageViewCreateInfo yViewCI {
+        .image = yuv.image.image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = is10Bit ? vk::Format::eR16Unorm : vk::Format::eR8Unorm,
+        .subresourceRange {
+            .aspectMask = vk::ImageAspectFlagBits::ePlane0,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    yuv.yView = ctx.dev.createImageView(yViewCI);
+
+    // Plane 1 (UV) view
+    vk::ImageViewCreateInfo uvViewCI {
+        .image = yuv.image.image,
+        .viewType = vk::ImageViewType::e2D,
+        .format = is10Bit ? vk::Format::eR16G16Unorm : vk::Format::eR8G8Unorm,
+        .subresourceRange {
+            .aspectMask = vk::ImageAspectFlagBits::ePlane1,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    yuv.uvView = ctx.dev.createImageView(uvViewCI);
+
+    return yuv;
+}
+
 namespace alvr::render {
 
 // Matches layer.comp's push constant block (std430).
@@ -535,6 +788,12 @@ Renderer::Renderer(
         .borderColor = vk::BorderColor::eFloatTransparentBlack,
     };
     sampler = vkCtx.dev.createSampler(samplerCI);
+
+    if (createInfo.enableYuvOutput) {
+        yuvPipe.emplace(vkCtx, sampler);
+        yuvOutput = createYuvImage(vkCtx, outExtent, createInfo.is10Bit);
+        renderFinishedSem = vkCtx.dev.createSemaphore({});
+    }
 
     vk::DescriptorSetLayoutBinding descBindings[2];
     descBindings[0] = {
@@ -759,6 +1018,30 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
         prev = nextOut;
     }
 
+    if (yuvPipe.has_value() && yuvOutput.has_value()) {
+        transitionImage(
+            *prev,
+            vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::AccessFlagBits::eShaderWrite,
+            vk::AccessFlagBits::eShaderRead,
+            barriers
+        );
+        transitionImage(
+            yuvOutput->image,
+            vk::ImageLayout::eGeneral,
+            vk::AccessFlagBits::eNone,
+            vk::AccessFlagBits::eShaderWrite,
+            barriers
+        );
+        flushBarriers(
+            barriers,
+            vk::PipelineStageFlagBits::eComputeShader,
+            vk::PipelineStageFlagBits::eComputeShader
+        );
+
+        yuvPipe->render(vkCtx, cmdBuf, prev->view, *yuvOutput, outExtent);
+    }
+
     cmdBuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, timestampPool, 1);
 
     cmdBuf.end();
@@ -766,6 +1049,8 @@ void Renderer::render(VkContext& vkCtx, std::vector<Layer> const& layers) {
     vk::SubmitInfo submitInfo {
         .commandBufferCount = 1,
         .pCommandBuffers = &cmdBuf,
+        .signalSemaphoreCount = yuvOutput.has_value() ? 1u : 0u,
+        .pSignalSemaphores = yuvOutput.has_value() ? &renderFinishedSem : nullptr,
     };
 
     vkCtx.useQueue([&](auto& queue) { queue.submit(submitInfo, fence); });
@@ -859,7 +1144,18 @@ void Renderer::releaseTextures(VkContext const& vkCtx, std::vector<u64> const& h
 }
 
 void Renderer::destroy(VkContext const& ctx) {
-    // ctx.dev.destroy(renderFinishedSem);
+    if (renderFinishedSem) {
+        ctx.dev.destroy(renderFinishedSem);
+        renderFinishedSem = VK_NULL_HANDLE;
+    }
+    if (yuvOutput.has_value()) {
+        yuvOutput->destroy(ctx);
+        yuvOutput.reset();
+    }
+    if (yuvPipe.has_value()) {
+        yuvPipe->destroy(ctx);
+        yuvPipe.reset();
+    }
 
     for (auto& pipe : pipes) {
         pipe.destroy(ctx);

@@ -1,29 +1,45 @@
 #version 450
 
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
-layout (binding = 0, rgba8) uniform readonly image2D in_img;
-layout (binding = 1, r8) uniform writeonly image2D out_img[3];
 
-/* FFmpeg/libavfilter/vf_scale_vulkan.c */
+layout (binding = 0, rgba8) uniform readonly image2D in_img;
+layout (binding = 1, r8) uniform writeonly image2D out_y;
+layout (binding = 2, rg8) uniform writeonly image2D out_uv;
+
+layout (push_constant) uniform YuvParams {
+    vec4 y_weights; // rgb weights + offset
+    vec4 u_weights; // rgb weights + offset
+    vec4 v_weights; // rgb weights + offset
+    uvec2 extent;   // output extent (width, height)
+} params;
 
 void main()
 {
-    const mat4 yuv_matrix = mat4(
-        0.0, 1.0, 0.0, 0.0,
-        0.0, -0.5, 0.5, 0.0,
-        0.5, -0.5, 0, 0.0,
-        0.0, 0.0, 0.0, 1.0
-    );
+    ivec2 uv_pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 y_pos = uv_pos * 2;
 
-    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    vec4 res = imageLoad(in_img, pos);
+    if (y_pos.x >= params.extent.x || y_pos.y >= params.extent.y) {
+        return;
+    }
 
-    res *= yuv_matrix;
-    res *= vec4(219.0 / 255.0, 224.0 / 255.0, 224.0 / 255.0, 1.0);
-    res += vec4(16.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 0.0);
+    vec4 c00 = imageLoad(in_img, y_pos + ivec2(0, 0));
+    vec4 c10 = imageLoad(in_img, y_pos + ivec2(1, 0));
+    vec4 c01 = imageLoad(in_img, y_pos + ivec2(0, 1));
+    vec4 c11 = imageLoad(in_img, y_pos + ivec2(1, 1));
 
-    imageStore(out_img[0], pos, vec4(res.r, 0.0, 0.0, 0.0));
-    pos /= ivec2(2);
-    imageStore(out_img[1], pos, vec4(res.g, 0.0, 0.0, 0.0));
-    imageStore(out_img[2], pos, vec4(res.b, 0.0, 0.0, 0.0));
+    float y00 = dot(c00.rgb, params.y_weights.rgb) + params.y_weights.a;
+    float y10 = dot(c10.rgb, params.y_weights.rgb) + params.y_weights.a;
+    float y01 = dot(c01.rgb, params.y_weights.rgb) + params.y_weights.a;
+    float y11 = dot(c11.rgb, params.y_weights.rgb) + params.y_weights.a;
+
+    imageStore(out_y, y_pos + ivec2(0, 0), vec4(y00, 0.0, 0.0, 0.0));
+    imageStore(out_y, y_pos + ivec2(1, 0), vec4(y10, 0.0, 0.0, 0.0));
+    imageStore(out_y, y_pos + ivec2(0, 1), vec4(y01, 0.0, 0.0, 0.0));
+    imageStore(out_y, y_pos + ivec2(1, 1), vec4(y11, 0.0, 0.0, 0.0));
+
+    vec3 c_avg = (c00.rgb + c10.rgb + c01.rgb + c11.rgb) * 0.25;
+    float u = dot(c_avg, params.u_weights.rgb) + params.u_weights.a;
+    float v = dot(c_avg, params.v_weights.rgb) + params.v_weights.a;
+
+    imageStore(out_uv, uv_pos, vec4(u, v, 0.0, 0.0));
 }

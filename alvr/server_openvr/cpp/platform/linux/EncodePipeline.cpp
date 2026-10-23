@@ -73,6 +73,13 @@ alvr::EncodePipeline::~EncodePipeline() {
     avcodec_free_context(&encoder_ctx);
 }
 
+bool alvr::EncodePipeline::EncodeFrame(
+    uint64_t targetTimestampNs, bool idr, FramePacket& packet
+) {
+    PushFrame(targetTimestampNs, idr);
+    return GetEncoded(packet);
+}
+
 bool alvr::EncodePipeline::GetEncoded(FramePacket& packet) {
     av_packet_free(&encoder_packet);
     encoder_packet = av_packet_alloc();

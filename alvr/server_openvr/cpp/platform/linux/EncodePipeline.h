@@ -17,7 +17,10 @@ class EncodePipeline : public IVideoEncoder {
 public:
     ~EncodePipeline() override;
 
-    bool GetEncoded(FramePacket& data) override;
+    bool EncodeFrame(uint64_t targetTimestampNs, bool idr, FramePacket& packet) override;
+    virtual void PushFrame(uint64_t targetTimestampNs, bool idr) = 0;
+    virtual bool GetEncoded(FramePacket& data);
+
     Timestamp GetTimestamp() const override { return timestamp; }
     int GetCodec() const override;
 
