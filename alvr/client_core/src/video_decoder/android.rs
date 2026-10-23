@@ -41,6 +41,8 @@ impl<T> Deref for FakeThreadSafe<T> {
 
 type SharedMediaCodec = Arc<FakeThreadSafe<MediaCodec>>;
 
+const DECODER_BURST_TIMEOUT: Duration = Duration::from_millis(25);
+
 pub struct VideoDecoderSink {
     inner: Arc<Mutex<Option<SharedMediaCodec>>>,
 }
@@ -55,7 +57,7 @@ impl VideoDecoderSink {
             return Ok(false);
         };
 
-        match decoder.dequeue_input_buffer(Duration::ZERO) {
+        match decoder.dequeue_input_buffer(DECODER_BURST_TIMEOUT) {
             Ok(DequeuedInputBufferResult::Buffer(mut buffer)) => {
                 unsafe {
                     ptr::copy_nonoverlapping(

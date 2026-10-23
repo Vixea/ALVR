@@ -31,11 +31,12 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const INPUT_QUEUE_SIZE: usize = 32;
 const INPUT_RECV_TIMEOUT: Duration = Duration::from_millis(10);
+const DECODER_BURST_TIMEOUT: Duration = Duration::from_millis(25);
 const SEND_RETRY_INTERVAL: Duration = Duration::from_micros(500);
 const MAX_SEND_RETRIES: usize = 200; // 100ms
 const TIMESTAMP_HISTORY_SIZE: usize = 128;
@@ -105,7 +106,7 @@ pub struct VideoDecoderSink {
 }
 
 impl VideoDecoderSink {
-    // Returns false if the decoder input queue is full
+    // Block until the packet is enqueued or burst timeout is reached. Returns false if timeout.
     pub fn push_frame_nal(&mut self, timestamp: Duration, data: &[u8]) -> Result<bool> {
         let buffer = if let Some(config_nal) = self.config_nal.take() {
             // Send parameter sets in-band with the first frame. Some V4L2 decoders ignore
@@ -115,10 +116,20 @@ impl VideoDecoderSink {
             data.to_vec()
         };
 
-        match self.packet_sender.try_send((timestamp, buffer)) {
-            Ok(()) => Ok(true),
-            Err(TrySendError::Full(_)) => Ok(false),
-            Err(TrySendError::Disconnected(_)) => bail!("Decoder thread stopped"),
+        let mut packet = (timestamp, buffer);
+        let deadline = Instant::now() + DECODER_BURST_TIMEOUT;
+        loop {
+            match self.packet_sender.try_send(packet) {
+                Ok(()) => return Ok(true),
+                Err(TrySendError::Full(p)) => {
+                    if Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                    packet = p;
+                    thread::sleep(SEND_RETRY_INTERVAL);
+                }
+                Err(TrySendError::Disconnected(_)) => bail!("Decoder thread stopped"),
+            }
         }
     }
 }
