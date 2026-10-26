@@ -362,7 +362,7 @@ pub fn entry_point() {
             encoder_10_bits: platform != Platform::Unknown,
             encoder_av1: matches!(
                 platform,
-                Platform::Quest3 | Platform::Quest3S | Platform::Pico4Ultra
+                Platform::Quest3 | Platform::Quest3S | Platform::Pico4Ultra | Platform::SteamFrame
             ),
             prefer_10bit: false,
             preferred_encoding_gamma: 1.0,

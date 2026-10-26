@@ -329,7 +329,7 @@ fn open_software_decoder(
     let sw_id = match config.codec {
         CodecType::H264 => codec::Id::H264,
         CodecType::Hevc => codec::Id::HEVC,
-        CodecType::AV1 => bail!("AV1 decoding is not supported on Linux yet"),
+        CodecType::AV1 => codec::Id::AV1,
     };
 
     let codec = ffmpeg::decoder::find(sw_id)
@@ -346,7 +346,7 @@ fn create_decoder(
     let (hw_name, sw_id) = match config.codec {
         CodecType::H264 => ("h264_v4l2m2m", codec::Id::H264),
         CodecType::Hevc => ("hevc_v4l2m2m", codec::Id::HEVC),
-        CodecType::AV1 => bail!("AV1 decoding is not supported on Linux yet"),
+        CodecType::AV1 => ("av1_v4l2m2m", codec::Id::AV1),
     };
 
     let dimensions = probe_dimensions(sw_id, &config.config_buffer);
